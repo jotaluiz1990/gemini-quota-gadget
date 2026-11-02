@@ -5,6 +5,7 @@ que se conecta diretamente ao serviço local do Antigravity e à interface do Ge
 para exibir o consumo real e contagem regressiva + data/hora de reset dos modelos de IA.
 """
 
+import copy
 import ctypes
 from datetime import datetime, timezone
 import json
@@ -99,6 +100,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "refresh_interval_sec": 30,
     "gemini_web_enabled": False,
     "gemini_web_cookie": "",
+    "last_known_quota": None,
+    "last_known_gemini_web": None,
 }
 
 MIN_WIDTH = 230
@@ -110,6 +113,37 @@ TRANSPARENT_KEY = "#010101"
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+
+def calculate_projected_ag_data(last_known: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
+    """Calcula os valores previstos para cada bucket com base na data/hora de reset salva."""
+    groups = copy.deepcopy(last_known.get("groups", []))
+    saved_ts = last_known.get("timestamp", "")
+    last_read_str = ""
+    if saved_ts:
+        try:
+            dt = datetime.fromisoformat(saved_ts).astimezone()
+            last_read_str = dt.strftime("%H:%M")
+        except Exception:
+            pass
+
+    now_utc = datetime.now(timezone.utc)
+
+    for group in groups:
+        for b in group.get("buckets", []):
+            reset_iso = b.get("resetTime")
+            if reset_iso:
+                try:
+                    iso_clean = reset_iso.replace("Z", "+00:00")
+                    target_utc = datetime.fromisoformat(iso_clean)
+                    diff_sec = int((target_utc - now_utc).total_seconds())
+                    if diff_sec <= 0:
+                        # O reset previsto já passou! A cota foi restabelecida para 100%!
+                        b["remainingFraction"] = 1.0
+                except Exception:
+                    pass
+
+    return groups, last_read_str
 
 
 def format_reset_info(reset_time_iso: Optional[str]) -> str:
@@ -125,21 +159,21 @@ def format_reset_info(reset_time_iso: Optional[str]) -> str:
         total_seconds = int(diff.total_seconds())
 
         if total_seconds <= 0:
-            countdown = "<1m"
-        else:
-            days = total_seconds // 86400
-            rem_sec = total_seconds % 86400
-            hours = rem_sec // 3600
-            mins = (rem_sec % 3600) // 60
+            return f"⏱ Reset já ocorrido ({local_dt.strftime('%d/%m às %H:%M')})"
 
-            if days > 0:
-                countdown = f"{days}d {hours}h" if hours > 0 else f"{days}d"
-            elif hours > 0:
-                countdown = f"{hours}h {mins}m" if mins > 0 else f"{hours}h"
-            elif mins > 0:
-                countdown = f"{mins}m"
-            else:
-                countdown = "<1m"
+        days = total_seconds // 86400
+        rem_sec = total_seconds % 86400
+        hours = rem_sec // 3600
+        mins = (rem_sec % 3600) // 60
+
+        if days > 0:
+            countdown = f"{days}d {hours}h" if hours > 0 else f"{days}d"
+        elif hours > 0:
+            countdown = f"{hours}h {mins}m" if mins > 0 else f"{hours}h"
+        elif mins > 0:
+            countdown = f"{mins}m"
+        else:
+            countdown = "<1m"
 
         date_str = local_dt.strftime("%d/%m às %H:%M")
         return f"⏱ Reseta em {countdown} • {date_str}"
@@ -597,8 +631,13 @@ class GeminiQuotaWidget(ctk.CTk):
 
         # Dicionários de referências a widgets existentes para atualização sem flicker
         self.rendered_cards: Dict[str, ctk.CTkFrame] = {}
+        self.card_headers: Dict[str, ctk.CTkFrame] = {}
+        self.card_badges: Dict[str, ctk.CTkLabel] = {}
+        self.card_banners: Dict[str, ctk.CTkLabel] = {}
         self.bucket_widgets: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self.gemini_web_card: Optional[ctk.CTkFrame] = None
+        self.gemini_web_badge: Optional[ctk.CTkLabel] = None
+        self.gemini_web_banner: Optional[ctk.CTkLabel] = None
         self.gemini_web_widgets: Dict[str, Any] = {}
         self.offline_widget: Optional[ctk.CTkFrame] = None
 
@@ -658,6 +697,9 @@ class GeminiQuotaWidget(ctk.CTk):
         self.build_ui()
         self.setup_drag_bindings()
         self.setup_resize_bindings()
+
+        # Exibe imediatamente dados em cache / previstos para evitar tela em branco ao iniciar
+        self._load_cached_quota_on_startup()
 
         # Consulta inicial
         self.refresh_data()
@@ -935,8 +977,32 @@ class GeminiQuotaWidget(ctk.CTk):
 
         threading.Thread(target=fetch_worker, daemon=True).start()
 
+    def _load_cached_quota_on_startup(self):
+        """Carrega e exibe instantaneamente os dados previstos/em cache salvos na última sessão."""
+        last_known = self.settings.get("last_known_quota")
+        if last_known and last_known.get("groups"):
+            projected_groups, last_read_str = calculate_projected_ag_data(last_known)
+            self.status_dot.configure(text_color="#f59e0b")
+            msg = f"Estimativa • Antigravity offline (leitura {last_read_str})" if last_read_str else "Estimativa • Antigravity offline"
+            self.lbl_footer.configure(text=msg)
+            self.update_quota_display(projected_groups, is_projected=True, last_read_str=last_read_str)
+
+        last_known_gw = self.settings.get("last_known_gemini_web")
+        if self.settings.get("gemini_web_enabled", False) and last_known_gw and last_known_gw.get("data"):
+            saved_ts = last_known_gw.get("timestamp", "")
+            lr_str = ""
+            if saved_ts:
+                try:
+                    lr_str = datetime.fromisoformat(saved_ts).astimezone().strftime("%H:%M")
+                except Exception:
+                    pass
+            self.update_gemini_web_card(last_known_gw["data"], is_projected=True, last_read_str=lr_str)
+
     def _apply_fetched_data(self, ag_groups: Optional[List[Dict[str, Any]]], gw_quota: Optional[Dict[str, Any]]):
         """Aplica os dados coletados nos componentes em tela SEM flicker."""
+        now_str = datetime.now().strftime("%H:%M:%S")
+
+        # 1. Antigravity Quota
         if ag_groups:
             self.latest_quota_data = ag_groups
             discovered_names = [g.get("displayName") for g in ag_groups if g.get("displayName")]
@@ -947,21 +1013,63 @@ class GeminiQuotaWidget(ctk.CTk):
                 self.offline_widget.destroy()
                 self.offline_widget = None
 
-            self.update_quota_display(ag_groups)
-            now_str = datetime.now().strftime("%H:%M:%S")
+            # Salva a última leitura bem-sucedida para persistência e estimativa futura
+            self.settings["last_known_quota"] = {
+                "timestamp": datetime.now().isoformat(),
+                "groups": ag_groups,
+            }
+            self.save_settings()
+
+            self.update_quota_display(ag_groups, is_projected=False)
             self.lbl_footer.configure(text=f"Atualizado às {now_str}")
         else:
-            self.status_dot.configure(text_color="#ef4444")
-            self.lbl_footer.configure(text="Aguardando conexão com Antigravity...")
-            if not self.latest_quota_data and not self.settings.get("gemini_web_enabled", False):
-                self.render_offline_state()
+            # Antigravity está offline: carrega última leitura e calcula dados previstos considerando resets
+            last_known = self.settings.get("last_known_quota")
+            if last_known and last_known.get("groups"):
+                projected_groups, last_read_str = calculate_projected_ag_data(last_known)
+                self.status_dot.configure(text_color="#f59e0b")
+                msg = f"Estimativa • Antigravity offline (leitura {last_read_str})" if last_read_str else "Estimativa • Antigravity offline"
+                self.lbl_footer.configure(text=msg)
 
-        # Atualiza card do Gemini Web (PRO) se ativado
+                if self.offline_widget is not None:
+                    self.offline_widget.destroy()
+                    self.offline_widget = None
+
+                self.update_quota_display(projected_groups, is_projected=True, last_read_str=last_read_str)
+            else:
+                self.status_dot.configure(text_color="#ef4444")
+                self.lbl_footer.configure(text="Aguardando conexão com Antigravity...")
+                if not self.latest_quota_data and not self.settings.get("gemini_web_enabled", False):
+                    self.render_offline_state()
+
+        # 2. Gemini Web Quota
         if self.settings.get("gemini_web_enabled", False):
-            self.update_gemini_web_card(gw_quota)
+            if gw_quota:
+                # Salva última leitura válida do Gemini Web
+                self.settings["last_known_gemini_web"] = {
+                    "timestamp": datetime.now().isoformat(),
+                    "data": gw_quota,
+                }
+                self.save_settings()
+                self.update_gemini_web_card(gw_quota, is_projected=False)
+            else:
+                last_known_gw = self.settings.get("last_known_gemini_web")
+                if last_known_gw and last_known_gw.get("data"):
+                    saved_ts = last_known_gw.get("timestamp", "")
+                    lr_str = ""
+                    if saved_ts:
+                        try:
+                            lr_str = datetime.fromisoformat(saved_ts).astimezone().strftime("%H:%M")
+                        except Exception:
+                            pass
+                    self.update_gemini_web_card(last_known_gw["data"], is_projected=True, last_read_str=lr_str)
+                else:
+                    self.update_gemini_web_card(None, is_projected=False)
         elif self.gemini_web_card is not None:
             self.gemini_web_card.destroy()
             self.gemini_web_card = None
+            self.gemini_web_badge = None
+            self.gemini_web_banner = None
             self.gemini_web_widgets.clear()
 
         self.check_scrollbar_visibility()
@@ -971,12 +1079,22 @@ class GeminiQuotaWidget(ctk.CTk):
         for widget in self.content_scroll.winfo_children():
             widget.destroy()
         self.rendered_cards.clear()
+        self.card_headers.clear()
+        self.card_badges.clear()
+        self.card_banners.clear()
         self.bucket_widgets.clear()
         self.gemini_web_card = None
+        self.gemini_web_badge = None
+        self.gemini_web_banner = None
         self.gemini_web_widgets.clear()
         self.offline_widget = None
 
-    def update_quota_display(self, groups: List[Dict[str, Any]]):
+    def update_quota_display(
+        self,
+        groups: List[Dict[str, Any]],
+        is_projected: bool = False,
+        last_read_str: str = "",
+    ):
         """Atualiza valores dos widgets de modelos do Antigravity em tempo real sem recriação (Zero Flicker)."""
         visible_set = set(self.settings.get("visible_groups", []))
 
@@ -1007,7 +1125,8 @@ class GeminiQuotaWidget(ctk.CTk):
                 self.rendered_cards[group_name] = card
 
                 header = ctk.CTkFrame(card, fg_color="transparent")
-                header.pack(fill="x", padx=10, pady=(8, 4))
+                header.pack(fill="x", padx=10, pady=(8, 2))
+                self.card_headers[group_name] = header
 
                 lbl_name = ctk.CTkLabel(
                     header,
@@ -1017,7 +1136,42 @@ class GeminiQuotaWidget(ctk.CTk):
                 )
                 lbl_name.pack(side="left")
 
+                badge_est = ctk.CTkLabel(
+                    header,
+                    text="⚠ ESTIMADO",
+                    font=ctk.CTkFont(size=9, weight="bold"),
+                    fg_color="#d97706",
+                    text_color="#18181f",
+                    corner_radius=4,
+                    padx=5,
+                    pady=1,
+                )
+                self.card_badges[group_name] = badge_est
+
+                lbl_banner = ctk.CTkLabel(
+                    card,
+                    text="",
+                    font=ctk.CTkFont(size=10),
+                    text_color="#f59e0b",
+                    anchor="w",
+                )
+                self.card_banners[group_name] = lbl_banner
+
             card = self.rendered_cards[group_name]
+            badge_est = self.card_badges[group_name]
+            lbl_banner = self.card_banners[group_name]
+
+            # Estilo do Card: Tom Amarelado/Âmbar se Estimado
+            if is_projected:
+                card.configure(fg_color="#272216", border_color="#d97706", border_width=1.5)
+                badge_est.pack(side="left", padx=(6, 0))
+                msg = f"Dados previstos • Antigravity offline (leitura {last_read_str})" if last_read_str else "Dados previstos • Antigravity offline"
+                lbl_banner.configure(text=msg)
+                lbl_banner.pack(fill="x", padx=10, pady=(0, 4), before=card.winfo_children()[1])
+            else:
+                card.configure(fg_color="#20202a", border_color="#30303c", border_width=1)
+                badge_est.pack_forget()
+                lbl_banner.pack_forget()
 
             # Atualiza ou cria cada bucket dentro do card
             for b in buckets:
@@ -1083,8 +1237,13 @@ class GeminiQuotaWidget(ctk.CTk):
                     w["pbar"].configure(progress_color=color)
                     w["lbl_reset"].configure(text=reset_text)
 
-    def update_gemini_web_card(self, data: Optional[Dict[str, Any]]):
-        """Renderiza ou atualiza o card do Gemini Web (PRO) com dados reais de consumo."""
+    def update_gemini_web_card(
+        self,
+        data: Optional[Dict[str, Any]],
+        is_projected: bool = False,
+        last_read_str: str = "",
+    ):
+        """Renderiza ou atualiza o card do Gemini Web (PRO) com dados reais ou previstos."""
         if self.gemini_web_card is None:
             card = ctk.CTkFrame(
                 self.content_scroll,
@@ -1096,9 +1255,9 @@ class GeminiQuotaWidget(ctk.CTk):
             card.pack(fill="x", padx=4, pady=5)
             self.gemini_web_card = card
 
-            # Cabeçalho com tag PRO
+            # Cabeçalho com tag PRO e badge ESTIMADO
             header = ctk.CTkFrame(card, fg_color="transparent")
-            header.pack(fill="x", padx=10, pady=(8, 4))
+            header.pack(fill="x", padx=10, pady=(8, 2))
 
             lbl_title = ctk.CTkLabel(
                 header,
@@ -1119,6 +1278,27 @@ class GeminiQuotaWidget(ctk.CTk):
                 pady=1,
             )
             tag_pro.pack(side="left", padx=(6, 0))
+
+            badge_est = ctk.CTkLabel(
+                header,
+                text="⚠ ESTIMADO",
+                font=ctk.CTkFont(size=9, weight="bold"),
+                fg_color="#d97706",
+                text_color="#18181f",
+                corner_radius=4,
+                padx=5,
+                pady=1,
+            )
+            self.gemini_web_badge = badge_est
+
+            lbl_banner = ctk.CTkLabel(
+                card,
+                text="",
+                font=ctk.CTkFont(size=10),
+                text_color="#f59e0b",
+                anchor="w",
+            )
+            self.gemini_web_banner = lbl_banner
 
             # Bloco 1: Uso Atual
             b1 = ctk.CTkFrame(card, fg_color="transparent")
@@ -1164,6 +1344,22 @@ class GeminiQuotaWidget(ctk.CTk):
                 "b2_bar": pbar2,
                 "b2_reset": lbl_b2_reset,
             }
+
+        # Estilo do Card: Tom Amarelado se Estimado
+        if is_projected:
+            self.gemini_web_card.configure(fg_color="#272216", border_color="#d97706", border_width=1.5)
+            if self.gemini_web_badge:
+                self.gemini_web_badge.pack(side="left", padx=(6, 0))
+            if self.gemini_web_banner:
+                msg = f"Dados previstos • Gemini Web offline (leitura {last_read_str})" if last_read_str else "Dados previstos • Gemini Web offline"
+                self.gemini_web_banner.configure(text=msg)
+                self.gemini_web_banner.pack(fill="x", padx=10, pady=(0, 4), before=self.gemini_web_card.winfo_children()[1])
+        else:
+            self.gemini_web_card.configure(fg_color="#20202a", border_color="#30303c", border_width=1)
+            if self.gemini_web_badge:
+                self.gemini_web_badge.pack_forget()
+            if self.gemini_web_banner:
+                self.gemini_web_banner.pack_forget()
 
         # Atualiza dados se disponíveis
         w = self.gemini_web_widgets
