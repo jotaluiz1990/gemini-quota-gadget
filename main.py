@@ -1,9 +1,9 @@
 """Gemini Quota Gadget - Monitor Desktop em Tempo Real de Cotas do Antigravity.
 
-Widget flutuante para Windows (frameless, topmost, drag-and-drop, redimensionável, system tray)
+Widget flutuante para Windows (frameless, cantos arredondados, topmost, drag-and-drop, redimensionável, system tray)
 que se conecta diretamente ao serviço local do Antigravity para exibir o consumo
-real e contagem regressiva de reset dos modelos de IA, com personalização
-de quais modelos exibir.
+real e contagem regressiva + data/hora de reset dos modelos de IA, com personalização
+de quais modelos exibir e atualização suave sem flicker.
 """
 
 import ctypes
@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw
@@ -35,7 +35,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "window_state": {
         "x": None,
         "y": None,
-        "width": 270,
+        "width": 275,
         "height": 435,
     },
     "visible_groups": [
@@ -51,37 +51,44 @@ MIN_HEIGHT = 200
 MAX_WIDTH = 800
 MAX_HEIGHT = 1200
 
+# Cor transparente para cantos arredondados suaves
+TRANSPARENT_KEY = "#010101"
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
-def format_reset_time(reset_time_iso: Optional[str]) -> str:
-    """Calcula a contagem regressiva humana a partir de um timestamp ISO UTC."""
+def format_reset_info(reset_time_iso: Optional[str]) -> str:
+    """Calcula a contagem regressiva e a data/hora local de redefinição."""
     if not reset_time_iso:
         return ""
     try:
         iso_clean = reset_time_iso.replace("Z", "+00:00")
-        target_dt = datetime.fromisoformat(iso_clean)
+        target_utc = datetime.fromisoformat(iso_clean)
+        local_dt = target_utc.astimezone()  # Fuso horário local do Windows
         now_dt = datetime.now(timezone.utc)
-        diff = target_dt - now_dt
+        diff = target_utc - now_dt
         total_seconds = int(diff.total_seconds())
 
         if total_seconds <= 0:
-            return "Reseta em <1m"
-
-        days = total_seconds // 86400
-        rem_sec = total_seconds % 86400
-        hours = rem_sec // 3600
-        mins = (rem_sec % 3600) // 60
-
-        if days > 0:
-            return f"Reseta em {days}d {hours}h" if hours > 0 else f"Reseta em {days}d"
-        elif hours > 0:
-            return f"Reseta em {hours}h {mins}m" if mins > 0 else f"Reseta em {hours}h"
-        elif mins > 0:
-            return f"Reseta em {mins}m"
+            countdown = "<1m"
         else:
-            return "Reseta em <1m"
+            days = total_seconds // 86400
+            rem_sec = total_seconds % 86400
+            hours = rem_sec // 3600
+            mins = (rem_sec % 3600) // 60
+
+            if days > 0:
+                countdown = f"{days}d {hours}h" if hours > 0 else f"{days}d"
+            elif hours > 0:
+                countdown = f"{hours}h {mins}m" if mins > 0 else f"{hours}h"
+            elif mins > 0:
+                countdown = f"{mins}m"
+            else:
+                countdown = "<1m"
+
+        date_str = local_dt.strftime("%d/%m às %H:%M")
+        return f"⏱ Reseta em {countdown} • {date_str}"
     except Exception:
         return ""
 
@@ -307,12 +314,13 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self.parent.settings["visible_groups"] = new_visible
         self.parent.save_settings()
+        self.parent.full_rebuild_cards()
         self.parent.refresh_data()
         self.destroy()
 
 
 class GeminiQuotaWidget(ctk.CTk):
-    """Widget Desktop Flutuante que exibe cotas reais em tempo real com suporte a redimensionamento."""
+    """Widget Desktop Flutuante com cantos arredondados, sem barra de tarefas, sem flicker e redimensionável."""
 
     def __init__(self):
         super().__init__()
@@ -322,6 +330,11 @@ class GeminiQuotaWidget(ctk.CTk):
         self.known_groups: List[str] = list(DEFAULT_SETTINGS["visible_groups"])
         self.latest_quota_data: List[Dict[str, Any]] = []
 
+        # Dicionário de referências a widgets existentes para evitar reconstrução e eliminar o flicker
+        self.rendered_cards: Dict[str, ctk.CTkFrame] = {}
+        self.bucket_widgets: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self.offline_widget: Optional[ctk.CTkFrame] = None
+
         self.load_settings()
 
         # Coordenadas e Dimensões da Janela
@@ -329,7 +342,7 @@ class GeminiQuotaWidget(ctk.CTk):
         sh = self.winfo_screenheight()
         pos_x = self.settings.get("window_state", {}).get("x")
         pos_y = self.settings.get("window_state", {}).get("y")
-        self.current_w = int(self.settings.get("window_state", {}).get("width", 270))
+        self.current_w = int(self.settings.get("window_state", {}).get("width", 275))
         self.current_h = int(self.settings.get("window_state", {}).get("height", 435))
 
         if pos_x is None or pos_y is None:
@@ -344,12 +357,15 @@ class GeminiQuotaWidget(ctk.CTk):
         self.settings["window_state"]["width"] = self.current_w
         self.settings["window_state"]["height"] = self.current_h
 
-        # Janela frameless e topmost
+        # Configuração da Janela: frameless e topmost (sem ícone na barra de tarefas)
         self.title("Antigravity Quota Live")
         self.geometry(f"{self.current_w}x{self.current_h}+{pos_x}+{pos_y}")
         self.overrideredirect(True)
         self.attributes("-topmost", True)
         self.resizable(False, False)
+
+        # Cantos arredondados: cor transparente na janela raiz + DWM Windows 11
+        self.setup_rounded_corners()
 
         # Variáveis de arraste de posição
         self._drag_offset_x = 0
@@ -368,7 +384,6 @@ class GeminiQuotaWidget(ctk.CTk):
         self.build_ui()
         self.setup_drag_bindings()
         self.setup_resize_bindings()
-        self.setup_windows_taskbar()
 
         # Consulta inicial
         self.refresh_data()
@@ -376,14 +391,36 @@ class GeminiQuotaWidget(ctk.CTk):
         # Agendamento do loop contínuo automático (a cada 30 segundos)
         self.schedule_next_refresh()
 
-        # Bandeja do sistema
+        # Bandeja do sistema (único local de presença do app no sistema)
         self.start_system_tray()
 
+    def setup_rounded_corners(self):
+        """Aplica cantos arredondados reais via transparência de cor e API DWM do Windows."""
+        if sys.platform == "win32":
+            try:
+                # Fundo raiz transparente elimina as quinas quadradas
+                self.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
+                self.configure(fg_color=TRANSPARENT_KEY)
+
+                # Cantos arredondados DWM do Windows 11
+                self.update_idletasks()
+                DWMWA_WINDOW_CORNER_PREFERENCE = 33
+                DWMWCP_ROUND = 2
+                hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    ctypes.byref(ctypes.c_int(DWMWCP_ROUND)),
+                    ctypes.sizeof(ctypes.c_int),
+                )
+            except Exception:
+                pass
+
     def build_ui(self):
-        """Constrói a interface visual do widget com suporte a redimensionamento."""
+        """Constrói a interface visual com cantos arredondados e botões proporcionais."""
         self.card = ctk.CTkFrame(
             self,
-            corner_radius=14,
+            corner_radius=16,
             border_width=1,
             border_color="#3a3a44",
             fg_color="#18181f",
@@ -412,47 +449,54 @@ class GeminiQuotaWidget(ctk.CTk):
         )
         self.lbl_app_title.pack(side="left")
 
-        # Botão Fechar / Ocultar para Tray
+        # Container dos 3 botões da direita (para manter alinhamento e proporções estritas)
+        actions_box = ctk.CTkFrame(self.top_bar, fg_color="transparent")
+        actions_box.pack(side="right")
+
+        BTN_SIZE = 26
+        BTN_RADIUS = 13
+
+        # Botão Fechar / Ocultar para Tray (✕)
         self.btn_hide = ctk.CTkButton(
-            self.top_bar,
+            actions_box,
             text="✕",
-            width=22,
-            height=22,
-            corner_radius=11,
+            width=BTN_SIZE,
+            height=BTN_SIZE,
+            corner_radius=BTN_RADIUS,
             fg_color="transparent",
             hover_color="#c0392b",
             text_color="#a0a0a0",
-            font=ctk.CTkFont(size=11, weight="bold"),
+            font=ctk.CTkFont(size=12, weight="bold"),
             command=self.hide_to_tray,
         )
-        self.btn_hide.pack(side="right", padx=(4, 0))
+        self.btn_hide.pack(side="right", padx=(3, 0))
 
         # Botão Configurações (⚙)
         self.btn_settings = ctk.CTkButton(
-            self.top_bar,
+            actions_box,
             text="⚙",
-            width=22,
-            height=22,
-            corner_radius=11,
+            width=BTN_SIZE,
+            height=BTN_SIZE,
+            corner_radius=BTN_RADIUS,
             fg_color="transparent",
             hover_color="#2c2c36",
             text_color="#a0a0a0",
             font=ctk.CTkFont(size=13),
             command=self.open_settings,
         )
-        self.btn_settings.pack(side="right", padx=(4, 0))
+        self.btn_settings.pack(side="right", padx=(3, 0))
 
-        # Botão Atualizar (🔄)
+        # Botão Atualizar (↻) - agora uniforme com os demais botões
         self.btn_refresh = ctk.CTkButton(
-            self.top_bar,
-            text="🔄",
-            width=22,
-            height=22,
-            corner_radius=11,
+            actions_box,
+            text="↻",
+            width=BTN_SIZE,
+            height=BTN_SIZE,
+            corner_radius=BTN_RADIUS,
             fg_color="transparent",
             hover_color="#2c2c36",
             text_color="#a0a0a0",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=14, weight="bold"),
             command=self.refresh_data,
         )
         self.btn_refresh.pack(side="right")
@@ -489,7 +533,7 @@ class GeminiQuotaWidget(ctk.CTk):
         )
         self.grip_corner.place(relx=1.0, rely=1.0, x=-5, y=-5, anchor="se")
 
-        # Bordas invisíveis ativas para puxar com o mouse
+        # Bordas ativas para puxar com o mouse
         self.grip_right = ctk.CTkFrame(self.card, width=6, fg_color="transparent", cursor="size_we")
         self.grip_right.place(relx=1.0, rely=0.08, relheight=0.86, x=-2, anchor="ne")
 
@@ -498,7 +542,7 @@ class GeminiQuotaWidget(ctk.CTk):
 
     def setup_drag_bindings(self):
         """Habilita mover a janela clicando no fundo ou barra de títulos."""
-        draggable_widgets = [self, self.card, self.top_bar, self.lbl_app_title, self.status_dot, self.lbl_footer, self.bottom_bar]
+        draggable_widgets = [self.card, self.top_bar, self.lbl_app_title, self.status_dot, self.lbl_footer, self.bottom_bar]
         for w in draggable_widgets:
             w.bind("<Button-1>", self.on_drag_start)
             w.bind("<B1-Motion>", self.on_drag_motion)
@@ -520,17 +564,14 @@ class GeminiQuotaWidget(ctk.CTk):
 
     def setup_resize_bindings(self):
         """Habilita redimensionar puxando o canto inferior direito ou as bordas."""
-        # Canto inferior direito: redimensiona largura e altura
         self.grip_corner.bind("<Button-1>", lambda e: self.on_resize_start(e, "wh"))
         self.grip_corner.bind("<B1-Motion>", self.on_resize_motion)
         self.grip_corner.bind("<ButtonRelease-1>", self.on_resize_end)
 
-        # Borda direita: redimensiona largura
         self.grip_right.bind("<Button-1>", lambda e: self.on_resize_start(e, "w"))
         self.grip_right.bind("<B1-Motion>", self.on_resize_motion)
         self.grip_right.bind("<ButtonRelease-1>", self.on_resize_end)
 
-        # Borda inferior: redimensiona altura
         self.grip_bottom.bind("<Button-1>", lambda e: self.on_resize_start(e, "h"))
         self.grip_bottom.bind("<B1-Motion>", self.on_resize_motion)
         self.grip_bottom.bind("<ButtonRelease-1>", self.on_resize_end)
@@ -543,7 +584,6 @@ class GeminiQuotaWidget(ctk.CTk):
         self._res_orig_h = self.current_h
 
     def on_resize_motion(self, event):
-        # Compensação de escala DPI do CustomTkinter (ex: 1.25 em monitores 125%)
         scale = self._get_window_scaling() if hasattr(self, "_get_window_scaling") else 1.0
         dw = int((event.x_root - self._res_start_x) / scale)
         dh = int((event.y_root - self._res_start_y) / scale)
@@ -559,39 +599,29 @@ class GeminiQuotaWidget(ctk.CTk):
         self.current_w = new_w
         self.current_h = new_h
         self.geometry(f"{new_w}x{new_h}")
+        self.check_scrollbar_visibility()
 
     def on_resize_end(self, event):
         self.settings["window_state"]["width"] = self.current_w
         self.settings["window_state"]["height"] = self.current_h
         self.save_settings()
+        self.check_scrollbar_visibility()
 
-    def setup_windows_taskbar(self):
-        """Garante exibição do ícone na barra de tarefas no Windows."""
-        if sys.platform == "win32":
+    def check_scrollbar_visibility(self):
+        """Oculta a barra de rolagem lateral quando todo o conteúdo cabe na tela."""
+        try:
             self.update_idletasks()
-            try:
-                GWL_EXSTYLE = -20
-                WS_EX_APPWINDOW = 0x00040000
-                WS_EX_TOOLWINDOW = 0x00000080
-                hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-
-                self.wm_withdraw()
-                self.after(20, self._reveal_window)
-            except Exception as e:
-                print(f"Fallback taskbar: {e}")
-                self.lift()
-                self.attributes("-topmost", True)
-        else:
-            self.lift()
-
-    def _reveal_window(self):
-        self.wm_deiconify()
-        self.lift()
-        self.attributes("-topmost", True)
-        self.focus_force()
+            canvas = self.content_scroll._parent_canvas
+            bbox = canvas.bbox("all")
+            if bbox:
+                content_height = bbox[3] - bbox[1]
+                canvas_height = canvas.winfo_height()
+                if content_height <= canvas_height + 4:
+                    self.content_scroll._scrollbar.grid_remove()
+                else:
+                    self.content_scroll._scrollbar.grid()
+        except Exception:
+            pass
 
     def load_settings(self):
         """Carrega preferências salvas ou migra esquema."""
@@ -618,17 +648,20 @@ class GeminiQuotaWidget(ctk.CTk):
             print(f"Erro ao salvar settings: {e}")
 
     def refresh_data(self):
-        """Busca cotas reais e atualiza a interface."""
+        """Busca cotas reais e atualiza os componentes em tela SEM recriar (Zero Flicker)."""
         groups = self.client.fetch_quota()
 
         if groups:
             self.latest_quota_data = groups
-            # Atualiza lista de grupos conhecidos
             discovered_names = [g.get("displayName") for g in groups if g.get("displayName")]
             self.known_groups = list(dict.fromkeys(self.known_groups + discovered_names))
 
             self.status_dot.configure(text_color="#10b981")  # Verde online
-            self.render_quota_cards(groups)
+            if self.offline_widget is not None:
+                self.offline_widget.destroy()
+                self.offline_widget = None
+
+            self.update_quota_display(groups)
 
             now_str = datetime.now().strftime("%H:%M:%S")
             self.lbl_footer.configure(text=f"Atualizado às {now_str}")
@@ -638,13 +671,135 @@ class GeminiQuotaWidget(ctk.CTk):
             if not self.latest_quota_data:
                 self.render_offline_state()
 
-    def render_offline_state(self):
-        """Exibe mensagem quando o serviço local não responde."""
+        self.check_scrollbar_visibility()
+
+    def full_rebuild_cards(self):
+        """Limpa referências para reconstrução completa quando a lista de modelos visíveis for alterada."""
         for widget in self.content_scroll.winfo_children():
             widget.destroy()
+        self.rendered_cards.clear()
+        self.bucket_widgets.clear()
+        self.offline_widget = None
+
+    def update_quota_display(self, groups: List[Dict[str, Any]]):
+        """Atualiza valores dos widgets existentes em tempo real sem recriação (Zero Piscada)."""
+        visible_set = set(self.settings.get("visible_groups", []))
+
+        # Se as chaves renderizadas forem diferentes do conjunto visível, reconstrói
+        active_rendered_groups = set(self.rendered_cards.keys())
+        wanted_groups = {g.get("displayName") for g in groups if g.get("displayName") in visible_set}
+        if active_rendered_groups != wanted_groups:
+            self.full_rebuild_cards()
+
+        for group in groups:
+            group_name = group.get("displayName", "Modelo")
+            if group_name not in visible_set:
+                continue
+
+            buckets = group.get("buckets", [])
+            if not buckets:
+                continue
+
+            # Cria o Card do Grupo se ainda não existir
+            if group_name not in self.rendered_cards:
+                card = ctk.CTkFrame(
+                    self.content_scroll,
+                    fg_color="#20202a",
+                    border_width=1,
+                    border_color="#30303c",
+                    corner_radius=10,
+                )
+                card.pack(fill="x", padx=4, pady=5)
+                self.rendered_cards[group_name] = card
+
+                header = ctk.CTkFrame(card, fg_color="transparent")
+                header.pack(fill="x", padx=10, pady=(8, 4))
+
+                lbl_name = ctk.CTkLabel(
+                    header,
+                    text=group_name,
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color="#ffffff",
+                )
+                lbl_name.pack(side="left")
+
+            card = self.rendered_cards[group_name]
+
+            # Atualiza ou cria cada bucket dentro do card
+            for b in buckets:
+                bucket_id = b.get("bucketId", b.get("window", "default"))
+                key = (group_name, bucket_id)
+
+                fraction = float(b.get("remainingFraction", 1.0))
+                pct = round(fraction * 100, 1)
+                color = get_color_for_fraction(fraction)
+                window_name = "Limite 5 Horas" if b.get("window") == "5h" else "Limite Semanal"
+                reset_text = format_reset_info(b.get("resetTime"))
+
+                if key not in self.bucket_widgets:
+                    # Cria os widgets do bucket uma única vez
+                    bucket_frame = ctk.CTkFrame(card, fg_color="transparent")
+                    bucket_frame.pack(fill="x", padx=10, pady=(2, 6))
+
+                    row1 = ctk.CTkFrame(bucket_frame, fg_color="transparent")
+                    row1.pack(fill="x")
+
+                    lbl_win = ctk.CTkLabel(
+                        row1,
+                        text=window_name,
+                        font=ctk.CTkFont(size=11),
+                        text_color="#aaaaaa",
+                    )
+                    lbl_win.pack(side="left")
+
+                    lbl_pct = ctk.CTkLabel(
+                        row1,
+                        text=f"{pct}% restante",
+                        font=ctk.CTkFont(size=11, weight="bold"),
+                        text_color=color,
+                    )
+                    lbl_pct.pack(side="right")
+
+                    pbar = ctk.CTkProgressBar(
+                        bucket_frame,
+                        width=210,
+                        height=6,
+                        corner_radius=3,
+                        progress_color=color,
+                    )
+                    pbar.set(max(0.0, min(1.0, fraction)))
+                    pbar.pack(fill="x", pady=(2, 2))
+
+                    lbl_reset = ctk.CTkLabel(
+                        bucket_frame,
+                        text=reset_text,
+                        font=ctk.CTkFont(size=10),
+                        text_color="#888899",
+                    )
+                    lbl_reset.pack(anchor="w")
+
+                    self.bucket_widgets[key] = {
+                        "lbl_pct": lbl_pct,
+                        "pbar": pbar,
+                        "lbl_reset": lbl_reset,
+                    }
+                else:
+                    # Atualização suave em memória (Zero Flicker)
+                    w = self.bucket_widgets[key]
+                    w["lbl_pct"].configure(text=f"{pct}% restante", text_color=color)
+                    w["pbar"].set(max(0.0, min(1.0, fraction)))
+                    w["pbar"].configure(progress_color=color)
+                    w["lbl_reset"].configure(text=reset_text)
+
+        self.check_scrollbar_visibility()
+
+    def render_offline_state(self):
+        """Exibe mensagem amigável quando o serviço local não responde."""
+        self.full_rebuild_cards()
 
         box = ctk.CTkFrame(self.content_scroll, fg_color="#202028", corner_radius=8)
         box.pack(fill="x", padx=4, pady=12)
+        self.offline_widget = box
 
         lbl = ctk.CTkLabel(
             box,
@@ -663,109 +818,6 @@ class GeminiQuotaWidget(ctk.CTk):
             command=self.refresh_data,
         )
         btn.pack(pady=(0, 12))
-
-    def render_quota_cards(self, groups: List[Dict[str, Any]]):
-        """Renderiza os cards dos grupos selecionados pelo usuário."""
-        for widget in self.content_scroll.winfo_children():
-            widget.destroy()
-
-        visible_set = set(self.settings.get("visible_groups", []))
-        rendered_count = 0
-
-        for group in groups:
-            display_name = group.get("displayName", "Modelo")
-            if display_name not in visible_set:
-                continue
-
-            rendered_count += 1
-            buckets = group.get("buckets", [])
-            if not buckets:
-                continue
-
-            # Card do Grupo
-            card = ctk.CTkFrame(
-                self.content_scroll,
-                fg_color="#20202a",
-                border_width=1,
-                border_color="#30303c",
-                corner_radius=10,
-            )
-            card.pack(fill="x", padx=4, pady=5)
-
-            # Cabeçalho do Card
-            header = ctk.CTkFrame(card, fg_color="transparent")
-            header.pack(fill="x", padx=10, pady=(8, 4))
-
-            lbl_name = ctk.CTkLabel(
-                header,
-                text=display_name,
-                font=ctk.CTkFont(size=12, weight="bold"),
-                text_color="#ffffff",
-            )
-            lbl_name.pack(side="left")
-
-            # Buckets (5h limit, weekly limit, etc.)
-            for b in buckets:
-                fraction = float(b.get("remainingFraction", 1.0))
-                pct = round(fraction * 100, 1)
-                color = get_color_for_fraction(fraction)
-                window_name = "Limite 5 Horas" if b.get("window") == "5h" else "Limite Semanal"
-
-                bucket_frame = ctk.CTkFrame(card, fg_color="transparent")
-                bucket_frame.pack(fill="x", padx=10, pady=(2, 6))
-
-                # Linha de porcentagem e nome do limite
-                row1 = ctk.CTkFrame(bucket_frame, fg_color="transparent")
-                row1.pack(fill="x")
-
-                lbl_win = ctk.CTkLabel(
-                    row1,
-                    text=window_name,
-                    font=ctk.CTkFont(size=11),
-                    text_color="#aaaaaa",
-                )
-                lbl_win.pack(side="left")
-
-                lbl_pct = ctk.CTkLabel(
-                    row1,
-                    text=f"{pct}% restante",
-                    font=ctk.CTkFont(size=11, weight="bold"),
-                    text_color=color,
-                )
-                lbl_pct.pack(side="right")
-
-                # Barra de progresso colorida
-                pbar = ctk.CTkProgressBar(
-                    bucket_frame,
-                    width=210,
-                    height=6,
-                    corner_radius=3,
-                    progress_color=color,
-                )
-                pbar.set(max(0.0, min(1.0, fraction)))
-                pbar.pack(fill="x", pady=(2, 2))
-
-                # Tempo até o reset
-                reset_text = format_reset_time(b.get("resetTime"))
-                if reset_text:
-                    lbl_reset = ctk.CTkLabel(
-                        bucket_frame,
-                        text=f"⏱ {reset_text}",
-                        font=ctk.CTkFont(size=10),
-                        text_color="#888899",
-                    )
-                    lbl_reset.pack(anchor="w")
-
-        if rendered_count == 0:
-            box = ctk.CTkFrame(self.content_scroll, fg_color="#202028", corner_radius=8)
-            box.pack(fill="x", padx=4, pady=12)
-            lbl = ctk.CTkLabel(
-                box,
-                text="Nenhum modelo selecionado.\nAbra as configurações (⚙) para ativar.",
-                font=ctk.CTkFont(size=11),
-                text_color="#aaaaaa",
-            )
-            lbl.pack(pady=12)
 
     def schedule_next_refresh(self):
         """Agenda atualização contínua em background (a cada 30 segundos)."""
