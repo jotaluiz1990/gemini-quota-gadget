@@ -11,3 +11,8 @@ ENV/
 
 # Project persistence
 quota_data.json
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
