@@ -1,9 +1,8 @@
-"""Gemini Quota Gadget - Monitor Desktop em Tempo Real de Cotas do Antigravity.
+"""Gemini Quota Gadget - Monitor Desktop em Tempo Real de Cotas do Antigravity e Gemini Web.
 
 Widget flutuante para Windows (frameless, cantos arredondados, topmost, drag-and-drop, redimensionável, system tray)
-que se conecta diretamente ao serviço local do Antigravity para exibir o consumo
-real e contagem regressiva + data/hora de reset dos modelos de IA, com personalização
-de quais modelos exibir e atualização suave sem flicker.
+que se conecta diretamente ao serviço local do Antigravity e à interface do Gemini Web (PRO)
+para exibir o consumo real e contagem regressiva + data/hora de reset dos modelos de IA.
 """
 
 import ctypes
@@ -22,6 +21,8 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw
 import pystray
 
+from gemini_web_client import GeminiWebClient
+
 # Diretório base para persistência (suporte a script .py e executável .exe)
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -35,8 +36,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "window_state": {
         "x": None,
         "y": None,
-        "width": 275,
-        "height": 435,
+        "width": 280,
+        "height": 450,
     },
     "visible_groups": [
         "Gemini Models",
@@ -44,6 +45,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "Claude and GPT models",
     ],
     "refresh_interval_sec": 30,
+    "gemini_web_enabled": False,
+    "gemini_web_cookie": "",
 }
 
 MIN_WIDTH = 230
@@ -51,7 +54,6 @@ MIN_HEIGHT = 200
 MAX_WIDTH = 800
 MAX_HEIGHT = 1200
 
-# Cor transparente para cantos arredondados suaves
 TRANSPARENT_KEY = "#010101"
 
 ctk.set_appearance_mode("dark")
@@ -65,7 +67,7 @@ def format_reset_info(reset_time_iso: Optional[str]) -> str:
     try:
         iso_clean = reset_time_iso.replace("Z", "+00:00")
         target_utc = datetime.fromisoformat(iso_clean)
-        local_dt = target_utc.astimezone()  # Fuso horário local do Windows
+        local_dt = target_utc.astimezone()
         now_dt = datetime.now(timezone.utc)
         diff = target_utc - now_dt
         total_seconds = int(diff.total_seconds())
@@ -93,7 +95,7 @@ def format_reset_info(reset_time_iso: Optional[str]) -> str:
         return ""
 
 
-def get_color_for_fraction(fraction: float) -> str:
+def get_color_for_remaining(fraction: float) -> str:
     """Retorna código de cor baseado no percentual restante (verde, amarelo ou vermelho)."""
     if fraction <= 0.20:
         return "#ef4444"  # Vermelho Alerta (<= 20%)
@@ -101,6 +103,16 @@ def get_color_for_fraction(fraction: float) -> str:
         return "#f59e0b"  # Amarelo/Laranja Atenção (<= 50%)
     else:
         return "#10b981"  # Verde Saudável (> 50%)
+
+
+def get_color_for_used(fraction_used: float) -> str:
+    """Retorna código de cor baseado no percentual USADO (verde se pouco usado, vermelho se muito usado)."""
+    if fraction_used >= 0.80:
+        return "#ef4444"  # Vermelho Alerta (>= 80% usado)
+    elif fraction_used >= 0.50:
+        return "#f59e0b"  # Amarelo Atenção (>= 50% usado)
+    else:
+        return "#10b981"  # Verde Confortável (< 50% usado)
 
 
 def generate_tray_icon_image() -> Image.Image:
@@ -114,7 +126,7 @@ def generate_tray_icon_image() -> Image.Image:
 
 
 class AntigravityQuotaClient:
-    """Cliente para descoberta de processo local e consulta de cotas via Connect-RPC."""
+    """Cliente para descoberta de processo local e consulta de cotas do Antigravity."""
 
     def __init__(self):
         self.cached_pid: Optional[int] = None
@@ -128,7 +140,6 @@ class AntigravityQuotaClient:
             if data is not None:
                 return data
 
-        # Redescoberta do processo
         if self._discover_service():
             return self._query_port(self.cached_port, self.cached_csrf)
         return None
@@ -162,7 +173,6 @@ class AntigravityQuotaClient:
 
             csrf_token = csrf_match.group(1)
 
-            # Busca portas TCP em escuta
             ports_cmd = (
                 f"Get-NetTCPConnection -OwningProcess {pid} -State Listen "
                 "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort"
@@ -211,20 +221,20 @@ class AntigravityQuotaClient:
 
 
 class SettingsWindow(ctk.CTkToplevel):
-    """Janela modal para seleção dos modelos de linguagem que devem aparecer no gadget."""
+    """Janela modal para seleção dos modelos e configuração dos cookies do Gemini Web."""
 
     def __init__(self, parent: "GeminiQuotaWidget", available_groups: List[str]):
         super().__init__(parent)
         self.parent = parent
         self.available_groups = available_groups
 
-        self.title("Modelos Visíveis")
-        self.geometry("310x380")
+        self.title("Configurações de Cotas e Modelos")
+        self.geometry("340x480")
         self.resizable(False, False)
         self.attributes("-topmost", True)
         self.transient(parent)
 
-        px = parent.winfo_x() - 20
+        px = parent.winfo_x() - 30
         py = parent.winfo_y() - 30
         self.geometry(f"+{max(10, px)}+{max(10, py)}")
 
@@ -238,29 +248,23 @@ class SettingsWindow(ctk.CTkToplevel):
         container = ctk.CTkFrame(self, corner_radius=12, fg_color="#18181f")
         container.pack(fill="both", expand=True, padx=8, pady=8)
 
-        lbl_title = ctk.CTkLabel(
-            container,
-            text="Exibição de Modelos",
-            font=ctk.CTkFont(size=15, weight="bold"),
+        # Scrollable container para caber tudo confortavelmente
+        scroll_main = ctk.CTkScrollableFrame(container, fg_color="transparent")
+        scroll_main.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # Seção 1: Modelos do Antigravity
+        lbl_sec1 = ctk.CTkLabel(
+            scroll_main,
+            text="Modelos do Antigravity (IDE)",
+            font=ctk.CTkFont(size=13, weight="bold"),
             text_color="#ffffff",
         )
-        lbl_title.pack(pady=(12, 4))
+        lbl_sec1.pack(anchor="w", padx=8, pady=(4, 4))
 
-        lbl_desc = ctk.CTkLabel(
-            container,
-            text="Escolha quais modelos deseja ver no gadget:",
-            font=ctk.CTkFont(size=11),
-            text_color="#aaaaaa",
-        )
-        lbl_desc.pack(pady=(0, 10))
-
-        # Lista com checkboxes
-        scroll = ctk.CTkScrollableFrame(container, height=180, fg_color="#1e1e28", corner_radius=8)
-        scroll.pack(fill="x", padx=12, pady=(0, 12))
+        grp_box = ctk.CTkFrame(scroll_main, fg_color="#1e1e28", corner_radius=8)
+        grp_box.pack(fill="x", padx=6, pady=(0, 10))
 
         current_visible = set(self.parent.settings.get("visible_groups", []))
-
-        # Adiciona grupos conhecidos e disponíveis
         all_groups = list(dict.fromkeys(self.available_groups + list(current_visible)))
         if not all_groups:
             all_groups = DEFAULT_SETTINGS["visible_groups"]
@@ -271,7 +275,7 @@ class SettingsWindow(ctk.CTkToplevel):
             self.check_vars[grp] = var
 
             chk = ctk.CTkCheckBox(
-                scroll,
+                grp_box,
                 text=grp,
                 variable=var,
                 font=ctk.CTkFont(size=12, weight="bold" if "Gemini" in grp else "normal"),
@@ -279,11 +283,79 @@ class SettingsWindow(ctk.CTkToplevel):
                 checkbox_height=18,
                 corner_radius=4,
             )
-            chk.pack(anchor="w", padx=8, pady=6)
+            chk.pack(anchor="w", padx=10, pady=6)
 
-        # Botões Salvar / Cancelar
+        # Seção 2: Gemini Web (PRO)
+        lbl_sec2 = ctk.CTkLabel(
+            scroll_main,
+            text="Google Gemini Web (PRO)",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#ffffff",
+        )
+        lbl_sec2.pack(anchor="w", padx=8, pady=(4, 4))
+
+        web_box = ctk.CTkFrame(scroll_main, fg_color="#1e1e28", corner_radius=8)
+        web_box.pack(fill="x", padx=6, pady=(0, 10))
+
+        self.var_web_enabled = ctk.BooleanVar(value=self.parent.settings.get("gemini_web_enabled", False))
+        self.chk_web = ctk.CTkCheckBox(
+            web_box,
+            text="Ativar Monitoramento do Gemini Web (PRO)",
+            variable=self.var_web_enabled,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            checkbox_width=18,
+            checkbox_height=18,
+            corner_radius=4,
+        )
+        self.chk_web.pack(anchor="w", padx=10, pady=(8, 6))
+
+        lbl_cookie = ctk.CTkLabel(
+            web_box,
+            text="Cookie de Sessão (__Secure-1PSID):",
+            font=ctk.CTkFont(size=11),
+            text_color="#cccccc",
+        )
+        lbl_cookie.pack(anchor="w", padx=10, pady=(4, 2))
+
+        self.entry_cookie = ctk.CTkEntry(
+            web_box,
+            placeholder_text="Cole o valor de __Secure-1PSID ou o cabeçalho Cookie",
+            height=28,
+            font=ctk.CTkFont(size=11),
+        )
+        saved_cookie = self.parent.settings.get("gemini_web_cookie", "")
+        if saved_cookie:
+            self.entry_cookie.insert(0, saved_cookie)
+        self.entry_cookie.pack(fill="x", padx=10, pady=(0, 6))
+
+        lbl_hint = ctk.CTkLabel(
+            web_box,
+            text="Dica: No gemini.google.com pressione F12 > Aplicativo >\nCookies > copie o valor de __Secure-1PSID.",
+            font=ctk.CTkFont(size=10),
+            text_color="#888899",
+            justify="left",
+        )
+        lbl_hint.pack(anchor="w", padx=10, pady=(0, 8))
+
+        # Botão Testar Conexão
+        self.lbl_test_result = ctk.CTkLabel(web_box, text="", font=ctk.CTkFont(size=10))
+        self.lbl_test_result.pack(anchor="w", padx=10, pady=(0, 4))
+
+        self.btn_test = ctk.CTkButton(
+            web_box,
+            text="Testar Conexão do Gemini Web",
+            width=180,
+            height=26,
+            fg_color="#2b2b36",
+            hover_color="#3a3a48",
+            font=ctk.CTkFont(size=11),
+            command=self._test_gemini_web_connection,
+        )
+        self.btn_test.pack(anchor="w", padx=10, pady=(0, 10))
+
+        # Botões de Ação Inferiores
         btn_box = ctk.CTkFrame(container, fg_color="transparent")
-        btn_box.pack(fill="x", padx=12, pady=(4, 10))
+        btn_box.pack(fill="x", padx=8, pady=(4, 4))
 
         btn_cancel = ctk.CTkButton(
             btn_box,
@@ -307,12 +379,47 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         btn_save.pack(side="right")
 
+    def _test_gemini_web_connection(self):
+        """Testa o cookie fornecido em segundo plano."""
+        cookie_text = self.entry_cookie.get().strip()
+        if not cookie_text:
+            self.lbl_test_result.configure(text="⚠ Cole o cookie antes de testar.", text_color="#ef4444")
+            return
+
+        self.btn_test.configure(state="disabled", text="Testando...")
+        self.lbl_test_result.configure(text="Conectando ao gemini.google.com...", text_color="#aaaaaa")
+
+        def run_test():
+            client = GeminiWebClient(cookie_text)
+            quota = client.fetch_quota(force_refresh=True)
+            if quota:
+                msg = f"✓ Conectado! (Uso: {quota.get('current_used_pct')}%)"
+                col = "#10b981"
+            else:
+                err = client.last_error or "Falha de autenticação"
+                msg = f"✗ Erro: {err}"
+                col = "#ef4444"
+
+            self.after(0, lambda: self._show_test_result(msg, col))
+
+        threading.Thread(target=run_test, daemon=True).start()
+
+    def _show_test_result(self, msg: str, color: str):
+        self.btn_test.configure(state="normal", text="Testar Conexão do Gemini Web")
+        self.lbl_test_result.configure(text=msg, text_color=color)
+
     def _save(self):
         new_visible = [grp for grp, var in self.check_vars.items() if var.get()]
         if not new_visible:
             new_visible = [list(self.check_vars.keys())[0]]
 
         self.parent.settings["visible_groups"] = new_visible
+        self.parent.settings["gemini_web_enabled"] = self.var_web_enabled.get()
+        self.parent.settings["gemini_web_cookie"] = self.entry_cookie.get().strip()
+
+        # Atualiza o cliente Gemini Web no pai
+        self.parent.web_client.set_cookies(self.parent.settings["gemini_web_cookie"])
+
         self.parent.save_settings()
         self.parent.full_rebuild_cards()
         self.parent.refresh_data()
@@ -330,20 +437,25 @@ class GeminiQuotaWidget(ctk.CTk):
         self.known_groups: List[str] = list(DEFAULT_SETTINGS["visible_groups"])
         self.latest_quota_data: List[Dict[str, Any]] = []
 
-        # Dicionário de referências a widgets existentes para evitar reconstrução e eliminar o flicker
+        self.load_settings()
+
+        # Cliente do Gemini Web
+        self.web_client = GeminiWebClient(self.settings.get("gemini_web_cookie", ""))
+
+        # Dicionários de referências a widgets existentes para atualização sem flicker
         self.rendered_cards: Dict[str, ctk.CTkFrame] = {}
         self.bucket_widgets: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self.gemini_web_card: Optional[ctk.CTkFrame] = None
+        self.gemini_web_widgets: Dict[str, Any] = {}
         self.offline_widget: Optional[ctk.CTkFrame] = None
-
-        self.load_settings()
 
         # Coordenadas e Dimensões da Janela
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         pos_x = self.settings.get("window_state", {}).get("x")
         pos_y = self.settings.get("window_state", {}).get("y")
-        self.current_w = int(self.settings.get("window_state", {}).get("width", 275))
-        self.current_h = int(self.settings.get("window_state", {}).get("height", 435))
+        self.current_w = int(self.settings.get("window_state", {}).get("width", 280))
+        self.current_h = int(self.settings.get("window_state", {}).get("height", 450))
 
         if pos_x is None or pos_y is None:
             pos_x = max(20, sw - self.current_w - 40)
@@ -357,14 +469,14 @@ class GeminiQuotaWidget(ctk.CTk):
         self.settings["window_state"]["width"] = self.current_w
         self.settings["window_state"]["height"] = self.current_h
 
-        # Configuração da Janela: frameless e topmost (sem ícone na barra de tarefas)
+        # Janela frameless e topmost (sem ícone na barra de tarefas)
         self.title("Antigravity Quota Live")
         self.geometry(f"{self.current_w}x{self.current_h}+{pos_x}+{pos_y}")
         self.overrideredirect(True)
         self.attributes("-topmost", True)
         self.resizable(False, False)
 
-        # Cantos arredondados: cor transparente na janela raiz + DWM Windows 11
+        # Cantos arredondados: cor transparente na raiz + DWM Windows 11
         self.setup_rounded_corners()
 
         # Variáveis de arraste de posição
@@ -391,18 +503,16 @@ class GeminiQuotaWidget(ctk.CTk):
         # Agendamento do loop contínuo automático (a cada 30 segundos)
         self.schedule_next_refresh()
 
-        # Bandeja do sistema (único local de presença do app no sistema)
+        # Bandeja do sistema
         self.start_system_tray()
 
     def setup_rounded_corners(self):
         """Aplica cantos arredondados reais via transparência de cor e API DWM do Windows."""
         if sys.platform == "win32":
             try:
-                # Fundo raiz transparente elimina as quinas quadradas
                 self.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
                 self.configure(fg_color=TRANSPARENT_KEY)
 
-                # Cantos arredondados DWM do Windows 11
                 self.update_idletasks()
                 DWMWA_WINDOW_CORNER_PREFERENCE = 33
                 DWMWCP_ROUND = 2
@@ -417,7 +527,7 @@ class GeminiQuotaWidget(ctk.CTk):
                 pass
 
     def build_ui(self):
-        """Constrói a interface visual com cantos arredondados e botões proporcionais."""
+        """Constrói a interface visual com cantos arredondados e botões perfeitamente alinhados."""
         self.card = ctk.CTkFrame(
             self,
             corner_radius=16,
@@ -449,7 +559,7 @@ class GeminiQuotaWidget(ctk.CTk):
         )
         self.lbl_app_title.pack(side="left")
 
-        # Container dos 3 botões da direita (para manter alinhamento e proporções estritas)
+        # Container dos 3 botões de ação com proporções idênticas
         actions_box = ctk.CTkFrame(self.top_bar, fg_color="transparent")
         actions_box.pack(side="right")
 
@@ -486,7 +596,7 @@ class GeminiQuotaWidget(ctk.CTk):
         )
         self.btn_settings.pack(side="right", padx=(3, 0))
 
-        # Botão Atualizar (↻) - agora uniforme com os demais botões
+        # Botão Atualizar (↻)
         self.btn_refresh = ctk.CTkButton(
             actions_box,
             text="↻",
@@ -648,44 +758,62 @@ class GeminiQuotaWidget(ctk.CTk):
             print(f"Erro ao salvar settings: {e}")
 
     def refresh_data(self):
-        """Busca cotas reais e atualiza os componentes em tela SEM recriar (Zero Flicker)."""
-        groups = self.client.fetch_quota()
+        """Busca cotas reais do Antigravity e do Gemini Web em background."""
+        def fetch_worker():
+            ag_groups = self.client.fetch_quota()
+            gw_quota = None
+            if self.settings.get("gemini_web_enabled", False):
+                gw_quota = self.web_client.fetch_quota()
 
-        if groups:
-            self.latest_quota_data = groups
-            discovered_names = [g.get("displayName") for g in groups if g.get("displayName")]
+            self.after(0, lambda: self._apply_fetched_data(ag_groups, gw_quota))
+
+        threading.Thread(target=fetch_worker, daemon=True).start()
+
+    def _apply_fetched_data(self, ag_groups: Optional[List[Dict[str, Any]]], gw_quota: Optional[Dict[str, Any]]):
+        """Aplica os dados coletados nos componentes em tela SEM flicker."""
+        if ag_groups:
+            self.latest_quota_data = ag_groups
+            discovered_names = [g.get("displayName") for g in ag_groups if g.get("displayName")]
             self.known_groups = list(dict.fromkeys(self.known_groups + discovered_names))
+            self.status_dot.configure(text_color="#10b981")
 
-            self.status_dot.configure(text_color="#10b981")  # Verde online
             if self.offline_widget is not None:
                 self.offline_widget.destroy()
                 self.offline_widget = None
 
-            self.update_quota_display(groups)
-
+            self.update_quota_display(ag_groups)
             now_str = datetime.now().strftime("%H:%M:%S")
             self.lbl_footer.configure(text=f"Atualizado às {now_str}")
         else:
-            self.status_dot.configure(text_color="#ef4444")  # Vermelho offline
+            self.status_dot.configure(text_color="#ef4444")
             self.lbl_footer.configure(text="Aguardando conexão com Antigravity...")
-            if not self.latest_quota_data:
+            if not self.latest_quota_data and not self.settings.get("gemini_web_enabled", False):
                 self.render_offline_state()
+
+        # Atualiza card do Gemini Web (PRO) se ativado
+        if self.settings.get("gemini_web_enabled", False):
+            self.update_gemini_web_card(gw_quota)
+        elif self.gemini_web_card is not None:
+            self.gemini_web_card.destroy()
+            self.gemini_web_card = None
+            self.gemini_web_widgets.clear()
 
         self.check_scrollbar_visibility()
 
     def full_rebuild_cards(self):
-        """Limpa referências para reconstrução completa quando a lista de modelos visíveis for alterada."""
+        """Limpa referências para reconstrução completa ao alterar seleção nas configurações."""
         for widget in self.content_scroll.winfo_children():
             widget.destroy()
         self.rendered_cards.clear()
         self.bucket_widgets.clear()
+        self.gemini_web_card = None
+        self.gemini_web_widgets.clear()
         self.offline_widget = None
 
     def update_quota_display(self, groups: List[Dict[str, Any]]):
-        """Atualiza valores dos widgets existentes em tempo real sem recriação (Zero Piscada)."""
+        """Atualiza valores dos widgets de modelos do Antigravity em tempo real sem recriação (Zero Flicker)."""
         visible_set = set(self.settings.get("visible_groups", []))
 
-        # Se as chaves renderizadas forem diferentes do conjunto visível, reconstrói
         active_rendered_groups = set(self.rendered_cards.keys())
         wanted_groups = {g.get("displayName") for g in groups if g.get("displayName") in visible_set}
         if active_rendered_groups != wanted_groups:
@@ -732,12 +860,11 @@ class GeminiQuotaWidget(ctk.CTk):
 
                 fraction = float(b.get("remainingFraction", 1.0))
                 pct = round(fraction * 100, 1)
-                color = get_color_for_fraction(fraction)
+                color = get_color_for_remaining(fraction)
                 window_name = "Limite 5 Horas" if b.get("window") == "5h" else "Limite Semanal"
                 reset_text = format_reset_info(b.get("resetTime"))
 
                 if key not in self.bucket_widgets:
-                    # Cria os widgets do bucket uma única vez
                     bucket_frame = ctk.CTkFrame(card, fg_color="transparent")
                     bucket_frame.pack(fill="x", padx=10, pady=(2, 6))
 
@@ -784,14 +911,122 @@ class GeminiQuotaWidget(ctk.CTk):
                         "lbl_reset": lbl_reset,
                     }
                 else:
-                    # Atualização suave em memória (Zero Flicker)
                     w = self.bucket_widgets[key]
                     w["lbl_pct"].configure(text=f"{pct}% restante", text_color=color)
                     w["pbar"].set(max(0.0, min(1.0, fraction)))
                     w["pbar"].configure(progress_color=color)
                     w["lbl_reset"].configure(text=reset_text)
 
-        self.check_scrollbar_visibility()
+    def update_gemini_web_card(self, data: Optional[Dict[str, Any]]):
+        """Renderiza ou atualiza o card do Gemini Web (PRO) com dados reais de consumo."""
+        if self.gemini_web_card is None:
+            card = ctk.CTkFrame(
+                self.content_scroll,
+                fg_color="#20202a",
+                border_width=1,
+                border_color="#30303c",
+                corner_radius=10,
+            )
+            card.pack(fill="x", padx=4, pady=5)
+            self.gemini_web_card = card
+
+            # Cabeçalho com tag PRO
+            header = ctk.CTkFrame(card, fg_color="transparent")
+            header.pack(fill="x", padx=10, pady=(8, 4))
+
+            lbl_title = ctk.CTkLabel(
+                header,
+                text="Gemini Web",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color="#ffffff",
+            )
+            lbl_title.pack(side="left")
+
+            tag_pro = ctk.CTkLabel(
+                header,
+                text="PRO",
+                font=ctk.CTkFont(size=9, weight="bold"),
+                fg_color="#3b8ed0",
+                corner_radius=4,
+                text_color="#ffffff",
+                padx=5,
+                pady=1,
+            )
+            tag_pro.pack(side="left", padx=(6, 0))
+
+            # Bloco 1: Uso Atual
+            b1 = ctk.CTkFrame(card, fg_color="transparent")
+            b1.pack(fill="x", padx=10, pady=(2, 5))
+
+            row1 = ctk.CTkFrame(b1, fg_color="transparent")
+            row1.pack(fill="x")
+            lbl_b1_title = ctk.CTkLabel(row1, text="Uso Atual", font=ctk.CTkFont(size=11), text_color="#aaaaaa")
+            lbl_b1_title.pack(side="left")
+            lbl_b1_val = ctk.CTkLabel(row1, text="--%", font=ctk.CTkFont(size=11, weight="bold"), text_color="#10b981")
+            lbl_b1_val.pack(side="right")
+
+            pbar1 = ctk.CTkProgressBar(b1, width=210, height=6, corner_radius=3, progress_color="#10b981")
+            pbar1.set(0)
+            pbar1.pack(fill="x", pady=(2, 2))
+
+            lbl_b1_reset = ctk.CTkLabel(b1, text="Aguardando dados...", font=ctk.CTkFont(size=10), text_color="#888899")
+            lbl_b1_reset.pack(anchor="w")
+
+            # Bloco 2: Limite Semanal
+            b2 = ctk.CTkFrame(card, fg_color="transparent")
+            b2.pack(fill="x", padx=10, pady=(2, 6))
+
+            row2 = ctk.CTkFrame(b2, fg_color="transparent")
+            row2.pack(fill="x")
+            lbl_b2_title = ctk.CTkLabel(row2, text="Limite Semanal", font=ctk.CTkFont(size=11), text_color="#aaaaaa")
+            lbl_b2_title.pack(side="left")
+            lbl_b2_val = ctk.CTkLabel(row2, text="--%", font=ctk.CTkFont(size=11, weight="bold"), text_color="#10b981")
+            lbl_b2_val.pack(side="right")
+
+            pbar2 = ctk.CTkProgressBar(b2, width=210, height=6, corner_radius=3, progress_color="#10b981")
+            pbar2.set(0)
+            pbar2.pack(fill="x", pady=(2, 2))
+
+            lbl_b2_reset = ctk.CTkLabel(b2, text="Aguardando dados...", font=ctk.CTkFont(size=10), text_color="#888899")
+            lbl_b2_reset.pack(anchor="w")
+
+            self.gemini_web_widgets = {
+                "b1_val": lbl_b1_val,
+                "b1_bar": pbar1,
+                "b1_reset": lbl_b1_reset,
+                "b2_val": lbl_b2_val,
+                "b2_bar": pbar2,
+                "b2_reset": lbl_b2_reset,
+            }
+
+        # Atualiza dados se disponíveis
+        w = self.gemini_web_widgets
+        if data:
+            c_pct = data.get("current_used_pct", 0.0)
+            c_frac = max(0.0, min(1.0, c_pct / 100.0))
+            c_col = get_color_for_used(c_frac)
+            c_reset = data.get("current_reset_text", "Limite redefinido em breve")
+
+            w["b1_val"].configure(text=f"{c_pct}% usado", text_color=c_col)
+            w["b1_bar"].set(c_frac)
+            w["b1_bar"].configure(progress_color=c_col)
+            w["b1_reset"].configure(text=f"⏱ {c_reset}")
+
+            w_pct = data.get("weekly_used_pct", 0.0)
+            w_frac = max(0.0, min(1.0, w_pct / 100.0))
+            w_col = get_color_for_used(w_frac)
+            w_reset = data.get("weekly_reset_text", "Limite semanal redefinido em breve")
+
+            w["b2_val"].configure(text=f"{w_pct}% usado", text_color=w_col)
+            w["b2_bar"].set(w_frac)
+            w["b2_bar"].configure(progress_color=w_col)
+            w["b2_reset"].configure(text=f"⏱ {w_reset}")
+        else:
+            err = self.web_client.last_error or "Aguardando autenticação (abra ⚙)"
+            w["b1_val"].configure(text="Offline", text_color="#ef4444")
+            w["b1_reset"].configure(text=err)
+            w["b2_val"].configure(text="Offline", text_color="#ef4444")
+            w["b2_reset"].configure(text="Configure o cookie nas configurações")
 
     def render_offline_state(self):
         """Exibe mensagem amigável quando o serviço local não responde."""
@@ -829,7 +1064,7 @@ class GeminiQuotaWidget(ctk.CTk):
         self.schedule_next_refresh()
 
     def open_settings(self):
-        """Abre a modal de configurações de modelos."""
+        """Abre a modal de configurações de modelos e Gemini Web."""
         if self.settings_window is not None and self.settings_window.winfo_exists():
             self.settings_window.lift()
             self.settings_window.focus_force()

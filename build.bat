@@ -25,7 +25,7 @@ python -m PyInstaller ^
     --add-data "!CTK_PATH!;customtkinter/" ^
     --hidden-import "pystray" ^
     --hidden-import "PIL" ^
-    --hidden-import "keyboard" ^
+    --hidden-import "gemini_web_client" ^
     main.py
 
 if %ERRORLEVEL% EQU 0 (
