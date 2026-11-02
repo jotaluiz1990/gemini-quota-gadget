@@ -187,52 +187,71 @@ class GeminiWebClient:
             return None
 
     def _extract_limits_from_json(self, data: Any) -> Dict[str, Any]:
-        """Extrai os limites e porcentagens usadas da árvore JSON."""
+        """Extrai os limites e porcentagens da árvore JSON do RPC jSf9Qc."""
         result = {
             "plan": "PRO",
+            "current_remaining_pct": 100.0,
             "current_used_pct": 0.0,
             "current_reset_text": "",
+            "weekly_remaining_pct": 100.0,
             "weekly_used_pct": 0.0,
             "weekly_reset_text": "",
             "raw": data,
         }
 
         try:
-            # Busca recursiva por frações ou floats de porcentagem
-            def scan(obj, path=""):
-                if isinstance(obj, list):
-                    for idx, val in enumerate(obj):
-                        scan(val, f"{path}[{idx}]")
-                elif isinstance(obj, dict):
-                    for k, val in obj.items():
-                        scan(val, f"{path}.{k}")
+            # Estrutura do jSf9Qc: [status, buckets_list, ...]
+            # Cada bucket: [bucket_id, used_fraction, window_type, [[reset_ts_sec, nanos]]]
+            buckets = None
+            if isinstance(data, list):
+                if len(data) > 1 and isinstance(data[1], list):
+                    buckets = data[1]
+                else:
+                    for item in data:
+                        if isinstance(item, list) and len(item) > 0 and isinstance(item[0], list):
+                            buckets = item
+                            break
 
-            scan(data)
-            # Estrutura padrão comum retornada no rpc jSf9Qc
-            if isinstance(data, list) and len(data) > 0:
-                # Tenta mapear o primeiro bloco de cota (uso atual) e o segundo (semanal)
-                for item in data:
-                    if isinstance(item, list):
-                        for sub in item:
-                            if isinstance(sub, list):
-                                # Procura itens que tenham número (ex: 0.17 ou 17)
-                                for elem in sub:
-                                    if isinstance(elem, (int, float)) and 0.0 <= elem <= 1.0:
-                                        if result["current_used_pct"] == 0.0:
-                                            result["current_used_pct"] = round(elem * 100, 1)
-                                        elif result["weekly_used_pct"] == 0.0:
-                                            result["weekly_used_pct"] = round(elem * 100, 1)
-                                    elif isinstance(elem, (int, float)) and 1.0 < elem <= 100.0:
-                                        if result["current_used_pct"] == 0.0:
-                                            result["current_used_pct"] = float(elem)
-                                        elif result["weekly_used_pct"] == 0.0:
-                                            result["weekly_used_pct"] = float(elem)
-                                    elif isinstance(elem, str) and ("redefinido" in elem or "reset" in elem.lower() or ":" in elem):
-                                        if not result["current_reset_text"]:
-                                            result["current_reset_text"] = elem
-                                        elif not result["weekly_reset_text"]:
-                                            result["weekly_reset_text"] = elem
-        except Exception:
-            pass
+            if buckets:
+                for b in buckets:
+                    if not isinstance(b, list) or len(b) < 3:
+                        continue
+                    used_frac = float(b[1]) if isinstance(b[1], (int, float)) else 0.0
+                    win_type = b[2]
+                    used_pct = round(used_frac * 100, 1)
+                    rem_pct = round(max(0.0, min(100.0, (1.0 - used_frac) * 100)), 1)
+
+                    # Formata contagem regressiva e data/hora do reset
+                    reset_text = ""
+                    if len(b) > 3 and isinstance(b[3], list) and len(b[3]) > 0:
+                        ts_info = b[3][0]
+                        if isinstance(ts_info, list) and len(ts_info) > 0:
+                            ts_sec = ts_info[0]
+                            if isinstance(ts_sec, (int, float)) and ts_sec > 1000000000:
+                                dt_local = datetime.fromtimestamp(ts_sec, timezone.utc).astimezone()
+                                now_local = datetime.now().astimezone()
+                                diff = dt_local - now_local
+                                total_sec = max(0, int(diff.total_seconds()))
+                                days = total_sec // 86400
+                                hours = (total_sec % 86400) // 3600
+                                minutes = (total_sec % 3600) // 60
+                                cd = f"{days}d {hours}h" if days > 0 else f"{hours}h {minutes}m"
+                                date_str = dt_local.strftime("%d/%m às %H:%M")
+                                reset_text = f"Reseta em {cd} • {date_str}"
+
+                    # win_type == 1 é Uso Atual (janela curta); win_type == 2 é Limite Semanal
+                    if win_type == 1:
+                        result["current_used_pct"] = used_pct
+                        result["current_remaining_pct"] = rem_pct
+                        if reset_text:
+                            result["current_reset_text"] = reset_text
+                    elif win_type == 2:
+                        result["weekly_used_pct"] = used_pct
+                        result["weekly_remaining_pct"] = rem_pct
+                        if reset_text:
+                            result["weekly_reset_text"] = reset_text
+
+        except Exception as e:
+            print(f"Erro ao extrair limites do jSf9Qc: {e}")
 
         return result

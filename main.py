@@ -15,6 +15,8 @@ import sys
 import threading
 import time
 import urllib.request
+if sys.platform == "win32":
+    import winreg
 from typing import Any, Dict, List, Optional, Tuple
 
 import customtkinter as ctk
@@ -36,6 +38,50 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DATA_FILE = os.path.join(BASE_DIR, "quota_data.json")
+
+AUTOSTART_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_APP_NAME = "GeminiQuotaGadget"
+
+
+def is_autostart_enabled() -> bool:
+    """Verifica se o app está configurado para iniciar junto com o Windows."""
+    if sys.platform != "win32":
+        return False
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY, 0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, AUTOSTART_APP_NAME)
+        winreg.CloseKey(key)
+        return bool(val)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def set_autostart_enabled(enable: bool) -> bool:
+    """Ativa ou desativa a inicialização automática no Registro do Windows."""
+    if sys.platform != "win32":
+        return False
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY, 0, winreg.KEY_ALL_ACCESS)
+        if enable:
+            if getattr(sys, "frozen", False):
+                cmd = f'"{sys.executable}"'
+            else:
+                pyw = sys.executable.replace("python.exe", "pythonw.exe")
+                main_py = os.path.abspath(__file__)
+                cmd = f'"{pyw}" "{main_py}"'
+            winreg.SetValueEx(key, AUTOSTART_APP_NAME, 0, winreg.REG_SZ, cmd)
+        else:
+            try:
+                winreg.DeleteValue(key, AUTOSTART_APP_NAME)
+            except FileNotFoundError:
+                pass
+        winreg.CloseKey(key)
+        return True
+    except Exception as e:
+        print(f"Erro ao atualizar autostart no Windows: {e}")
+        return False
 
 # Configurações padrão
 DEFAULT_SETTINGS: Dict[str, Any] = {
@@ -235,7 +281,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.available_groups = available_groups
 
         self.title("Configurações de Cotas e Modelos")
-        self.geometry("360x520")
+        self.geometry("360x560")
         self.resizable(False, False)
         self.attributes("-topmost", True)
         self.transient(parent)
@@ -381,6 +427,28 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         self.btn_test.pack(anchor="w", padx=10, pady=(0, 10))
 
+        # Seção 3: Sistema e Inicialização
+        lbl_sec3 = ctk.CTkLabel(
+            scroll_main,
+            text="Sistema e Inicialização",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#ffffff",
+        )
+        lbl_sec3.pack(anchor="w", padx=8, pady=(6, 4))
+
+        sys_box = ctk.CTkFrame(scroll_main, fg_color="#1e1e28", corner_radius=8)
+        sys_box.pack(fill="x", padx=6, pady=(0, 10))
+
+        self.var_autostart = ctk.BooleanVar(value=is_autostart_enabled())
+        self.switch_autostart = ctk.CTkSwitch(
+            sys_box,
+            text="Iniciar automaticamente com o Windows",
+            variable=self.var_autostart,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._on_autostart_toggle,
+        )
+        self.switch_autostart.pack(anchor="w", padx=12, pady=10)
+
         # Botões de Ação Inferiores
         btn_box = ctk.CTkFrame(container, fg_color="transparent")
         btn_box.pack(fill="x", padx=8, pady=(4, 4))
@@ -490,6 +558,9 @@ class SettingsWindow(ctk.CTkToplevel):
         self.btn_test.configure(state="normal", text="Testar Conexão Atual")
         self.lbl_test_result.configure(text=msg, text_color=color)
 
+    def _on_autostart_toggle(self):
+        set_autostart_enabled(self.var_autostart.get())
+
     def _save(self):
         new_visible = [grp for grp, var in self.check_vars.items() if var.get()]
         if not new_visible:
@@ -531,20 +602,29 @@ class GeminiQuotaWidget(ctk.CTk):
         self.gemini_web_widgets: Dict[str, Any] = {}
         self.offline_widget: Optional[ctk.CTkFrame] = None
 
-        # Coordenadas e Dimensões da Janela
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
+        # Coordenadas e Dimensões da Janela (suporte pleno a desktop multi-monitor)
         pos_x = self.settings.get("window_state", {}).get("x")
         pos_y = self.settings.get("window_state", {}).get("y")
         self.current_w = int(self.settings.get("window_state", {}).get("width", 280))
         self.current_h = int(self.settings.get("window_state", {}).get("height", 450))
 
+        if sys.platform == "win32":
+            vx = ctypes.windll.user32.GetSystemMetrics(76)
+            vy = ctypes.windll.user32.GetSystemMetrics(77)
+            vw = ctypes.windll.user32.GetSystemMetrics(78)
+            vh = ctypes.windll.user32.GetSystemMetrics(79)
+        else:
+            vx, vy = 0, 0
+            vw = self.winfo_screenwidth()
+            vh = self.winfo_screenheight()
+
         if pos_x is None or pos_y is None:
-            pos_x = max(20, sw - self.current_w - 40)
+            pos_x = max(20, vw - self.current_w - 40)
             pos_y = 60
         else:
-            pos_x = max(0, min(sw - self.current_w, int(pos_x)))
-            pos_y = max(0, min(sh - 200, int(pos_y)))
+            # Valida para manter a janela visível no desktop virtual
+            pos_x = max(vx, min(vx + vw - 80, int(pos_x)))
+            pos_y = max(vy, min(vy + vh - 80, int(pos_y)))
 
         self.settings["window_state"]["x"] = pos_x
         self.settings["window_state"]["y"] = pos_y
@@ -752,6 +832,8 @@ class GeminiQuotaWidget(ctk.CTk):
         self.geometry(f"+{new_x}+{new_y}")
 
     def on_drag_end(self, event):
+        self.settings["window_state"]["x"] = self.winfo_x()
+        self.settings["window_state"]["y"] = self.winfo_y()
         self.save_settings()
 
     def setup_resize_bindings(self):
@@ -794,6 +876,8 @@ class GeminiQuotaWidget(ctk.CTk):
         self.check_scrollbar_visibility()
 
     def on_resize_end(self, event):
+        self.settings["window_state"]["x"] = self.winfo_x()
+        self.settings["window_state"]["y"] = self.winfo_y()
         self.settings["window_state"]["width"] = self.current_w
         self.settings["window_state"]["height"] = self.current_h
         self.save_settings()
@@ -1084,25 +1168,27 @@ class GeminiQuotaWidget(ctk.CTk):
         # Atualiza dados se disponíveis
         w = self.gemini_web_widgets
         if data:
-            c_pct = data.get("current_used_pct", 0.0)
-            c_frac = max(0.0, min(1.0, c_pct / 100.0))
-            c_col = get_color_for_used(c_frac)
+            # Bloco 1: Uso Atual (exibe % restante unificada com a mesma identidade visual)
+            c_rem = data.get("current_remaining_pct", round(max(0.0, 100.0 - data.get("current_used_pct", 0.0)), 1))
+            c_frac = max(0.0, min(1.0, c_rem / 100.0))
+            c_col = get_color_for_remaining(c_frac)
             c_reset = data.get("current_reset_text", "Limite redefinido em breve")
 
-            w["b1_val"].configure(text=f"{c_pct}% usado", text_color=c_col)
+            w["b1_val"].configure(text=f"{c_rem}% restante", text_color=c_col)
             w["b1_bar"].set(c_frac)
             w["b1_bar"].configure(progress_color=c_col)
-            w["b1_reset"].configure(text=f"⏱ {c_reset}")
+            w["b1_reset"].configure(text=c_reset)
 
-            w_pct = data.get("weekly_used_pct", 0.0)
-            w_frac = max(0.0, min(1.0, w_pct / 100.0))
-            w_col = get_color_for_used(w_frac)
+            # Bloco 2: Limite Semanal (exibe % restante unificada)
+            w_rem = data.get("weekly_remaining_pct", round(max(0.0, 100.0 - data.get("weekly_used_pct", 0.0)), 1))
+            w_frac = max(0.0, min(1.0, w_rem / 100.0))
+            w_col = get_color_for_remaining(w_frac)
             w_reset = data.get("weekly_reset_text", "Limite semanal redefinido em breve")
 
-            w["b2_val"].configure(text=f"{w_pct}% usado", text_color=w_col)
+            w["b2_val"].configure(text=f"{w_rem}% restante", text_color=w_col)
             w["b2_bar"].set(w_frac)
             w["b2_bar"].configure(progress_color=w_col)
-            w["b2_reset"].configure(text=f"⏱ {w_reset}")
+            w["b2_reset"].configure(text=w_reset)
         else:
             err = self.web_client.last_error or "Aguardando autenticação (abra ⚙)"
             w["b1_val"].configure(text="Offline", text_color="#ef4444")
@@ -1180,7 +1266,15 @@ class GeminiQuotaWidget(ctk.CTk):
         self.tray_icon.run()
 
     def exit_app(self):
-        """Encerra a aplicação de forma limpa."""
+        """Encerra a aplicação de forma limpa garantindo persistência da posição."""
+        try:
+            self.settings["window_state"]["x"] = self.winfo_x()
+            self.settings["window_state"]["y"] = self.winfo_y()
+            self.settings["window_state"]["width"] = self.current_w
+            self.settings["window_state"]["height"] = self.current_h
+            self.save_settings()
+        except Exception:
+            pass
         if self.tray_icon is not None:
             try:
                 self.tray_icon.stop()
