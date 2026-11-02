@@ -1,6 +1,6 @@
 """Gemini Quota Gadget - Monitor Desktop em Tempo Real de Cotas do Antigravity.
 
-Widget flutuante para Windows (frameless, topmost, drag-and-drop, system tray)
+Widget flutuante para Windows (frameless, topmost, drag-and-drop, redimensionável, system tray)
 que se conecta diretamente ao serviço local do Antigravity para exibir o consumo
 real e contagem regressiva de reset dos modelos de IA, com personalização
 de quais modelos exibir.
@@ -35,6 +35,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "window_state": {
         "x": None,
         "y": None,
+        "width": 270,
+        "height": 435,
     },
     "visible_groups": [
         "Gemini Models",
@@ -44,7 +46,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "refresh_interval_sec": 30,
 }
 
-WIDTH = 270
+MIN_WIDTH = 230
+MIN_HEIGHT = 200
+MAX_WIDTH = 800
+MAX_HEIGHT = 1200
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -298,7 +303,6 @@ class SettingsWindow(ctk.CTkToplevel):
     def _save(self):
         new_visible = [grp for grp, var in self.check_vars.items() if var.get()]
         if not new_visible:
-            # Pelo menos um selecionado
             new_visible = [list(self.check_vars.keys())[0]]
 
         self.parent.settings["visible_groups"] = new_visible
@@ -308,7 +312,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
 
 class GeminiQuotaWidget(ctk.CTk):
-    """Widget Desktop Flutuante que exibe cotas reais em tempo real."""
+    """Widget Desktop Flutuante que exibe cotas reais em tempo real com suporte a redimensionamento."""
 
     def __init__(self):
         super().__init__()
@@ -320,51 +324,63 @@ class GeminiQuotaWidget(ctk.CTk):
 
         self.load_settings()
 
-        # Coordenadas da Janela (centralizado ou salvo)
+        # Coordenadas e Dimensões da Janela
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         pos_x = self.settings.get("window_state", {}).get("x")
         pos_y = self.settings.get("window_state", {}).get("y")
+        self.current_w = int(self.settings.get("window_state", {}).get("width", 270))
+        self.current_h = int(self.settings.get("window_state", {}).get("height", 435))
 
         if pos_x is None or pos_y is None:
-            pos_x = max(20, sw - WIDTH - 40)
+            pos_x = max(20, sw - self.current_w - 40)
             pos_y = 60
         else:
-            pos_x = max(0, min(sw - WIDTH, int(pos_x)))
+            pos_x = max(0, min(sw - self.current_w, int(pos_x)))
             pos_y = max(0, min(sh - 200, int(pos_y)))
 
         self.settings["window_state"]["x"] = pos_x
         self.settings["window_state"]["y"] = pos_y
+        self.settings["window_state"]["width"] = self.current_w
+        self.settings["window_state"]["height"] = self.current_h
 
         # Janela frameless e topmost
         self.title("Antigravity Quota Live")
-        self.geometry(f"{WIDTH}x360+{pos_x}+{pos_y}")
+        self.geometry(f"{self.current_w}x{self.current_h}+{pos_x}+{pos_y}")
         self.overrideredirect(True)
         self.attributes("-topmost", True)
         self.resizable(False, False)
 
-        # Variáveis de arraste
-        self._offset_x = 0
-        self._offset_y = 0
+        # Variáveis de arraste de posição
+        self._drag_offset_x = 0
+        self._drag_offset_y = 0
+
+        # Variáveis de redimensionamento
+        self._res_mode = ""
+        self._res_start_x = 0
+        self._res_start_y = 0
+        self._res_orig_w = self.current_w
+        self._res_orig_h = self.current_h
 
         self.settings_window: Optional[SettingsWindow] = None
         self.tray_icon: Optional[pystray.Icon] = None
 
         self.build_ui()
         self.setup_drag_bindings()
+        self.setup_resize_bindings()
         self.setup_windows_taskbar()
 
         # Consulta inicial
         self.refresh_data()
 
-        # Agendamento do loop contínuo automático
+        # Agendamento do loop contínuo automático (a cada 30 segundos)
         self.schedule_next_refresh()
 
         # Bandeja do sistema
         self.start_system_tray()
 
     def build_ui(self):
-        """Constrói a interface base."""
+        """Constrói a interface visual do widget com suporte a redimensionamento."""
         self.card = ctk.CTkFrame(
             self,
             corner_radius=14,
@@ -447,37 +463,106 @@ class GeminiQuotaWidget(ctk.CTk):
             fg_color="transparent",
             corner_radius=8,
         )
-        self.content_scroll.pack(fill="both", expand=True, padx=8, pady=(2, 6))
+        self.content_scroll.pack(fill="both", expand=True, padx=8, pady=(2, 2))
 
-        # Barra inferior com status de atualização
+        # Barra inferior com status de atualização e alça de redimensionamento
+        self.bottom_bar = ctk.CTkFrame(self.card, fg_color="transparent", height=24)
+        self.bottom_bar.pack(side="bottom", fill="x", padx=10, pady=(2, 6))
+
         self.lbl_footer = ctk.CTkLabel(
-            self.card,
+            self.bottom_bar,
             text="Atualizando...",
             font=ctk.CTkFont(size=10),
             text_color="#777788",
         )
-        self.lbl_footer.pack(side="bottom", pady=(0, 6))
+        self.lbl_footer.pack(side="left", padx=(4, 0))
+
+        # Alça visual de canto (ícone ◿ no canto inferior direito)
+        self.grip_corner = ctk.CTkLabel(
+            self.card,
+            text="◿",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#555566",
+            cursor="size_nw_se",
+            width=16,
+            height=16,
+        )
+        self.grip_corner.place(relx=1.0, rely=1.0, x=-5, y=-5, anchor="se")
+
+        # Bordas invisíveis ativas para puxar com o mouse
+        self.grip_right = ctk.CTkFrame(self.card, width=6, fg_color="transparent", cursor="size_we")
+        self.grip_right.place(relx=1.0, rely=0.08, relheight=0.86, x=-2, anchor="ne")
+
+        self.grip_bottom = ctk.CTkFrame(self.card, height=6, fg_color="transparent", cursor="size_ns")
+        self.grip_bottom.place(relx=0.0, rely=1.0, relwidth=0.88, y=-2, anchor="sw")
 
     def setup_drag_bindings(self):
         """Habilita mover a janela clicando no fundo ou barra de títulos."""
-        draggable_widgets = [self, self.card, self.top_bar, self.lbl_app_title, self.status_dot, self.lbl_footer]
+        draggable_widgets = [self, self.card, self.top_bar, self.lbl_app_title, self.status_dot, self.lbl_footer, self.bottom_bar]
         for w in draggable_widgets:
             w.bind("<Button-1>", self.on_drag_start)
             w.bind("<B1-Motion>", self.on_drag_motion)
             w.bind("<ButtonRelease-1>", self.on_drag_end)
 
     def on_drag_start(self, event):
-        self._offset_x = event.x_root - self.winfo_x()
-        self._offset_y = event.y_root - self.winfo_y()
+        self._drag_offset_x = event.x_root - self.winfo_x()
+        self._drag_offset_y = event.y_root - self.winfo_y()
 
     def on_drag_motion(self, event):
-        new_x = event.x_root - self._offset_x
-        new_y = event.y_root - self._offset_y
+        new_x = event.x_root - self._drag_offset_x
+        new_y = event.y_root - self._drag_offset_y
         self.settings["window_state"]["x"] = new_x
         self.settings["window_state"]["y"] = new_y
         self.geometry(f"+{new_x}+{new_y}")
 
     def on_drag_end(self, event):
+        self.save_settings()
+
+    def setup_resize_bindings(self):
+        """Habilita redimensionar puxando o canto inferior direito ou as bordas."""
+        # Canto inferior direito: redimensiona largura e altura
+        self.grip_corner.bind("<Button-1>", lambda e: self.on_resize_start(e, "wh"))
+        self.grip_corner.bind("<B1-Motion>", self.on_resize_motion)
+        self.grip_corner.bind("<ButtonRelease-1>", self.on_resize_end)
+
+        # Borda direita: redimensiona largura
+        self.grip_right.bind("<Button-1>", lambda e: self.on_resize_start(e, "w"))
+        self.grip_right.bind("<B1-Motion>", self.on_resize_motion)
+        self.grip_right.bind("<ButtonRelease-1>", self.on_resize_end)
+
+        # Borda inferior: redimensiona altura
+        self.grip_bottom.bind("<Button-1>", lambda e: self.on_resize_start(e, "h"))
+        self.grip_bottom.bind("<B1-Motion>", self.on_resize_motion)
+        self.grip_bottom.bind("<ButtonRelease-1>", self.on_resize_end)
+
+    def on_resize_start(self, event, mode: str):
+        self._res_mode = mode
+        self._res_start_x = event.x_root
+        self._res_start_y = event.y_root
+        self._res_orig_w = self.current_w
+        self._res_orig_h = self.current_h
+
+    def on_resize_motion(self, event):
+        # Compensação de escala DPI do CustomTkinter (ex: 1.25 em monitores 125%)
+        scale = self._get_window_scaling() if hasattr(self, "_get_window_scaling") else 1.0
+        dw = int((event.x_root - self._res_start_x) / scale)
+        dh = int((event.y_root - self._res_start_y) / scale)
+
+        new_w = self._res_orig_w
+        new_h = self._res_orig_h
+
+        if "w" in self._res_mode:
+            new_w = max(MIN_WIDTH, min(MAX_WIDTH, self._res_orig_w + dw))
+        if "h" in self._res_mode:
+            new_h = max(MIN_HEIGHT, min(MAX_HEIGHT, self._res_orig_h + dh))
+
+        self.current_w = new_w
+        self.current_h = new_h
+        self.geometry(f"{new_w}x{new_h}")
+
+    def on_resize_end(self, event):
+        self.settings["window_state"]["width"] = self.current_w
+        self.settings["window_state"]["height"] = self.current_h
         self.save_settings()
 
     def setup_windows_taskbar(self):
@@ -683,7 +768,7 @@ class GeminiQuotaWidget(ctk.CTk):
             lbl.pack(pady=12)
 
     def schedule_next_refresh(self):
-        """Agenda atualização contínua em background."""
+        """Agenda atualização contínua em background (a cada 30 segundos)."""
         interval = self.settings.get("refresh_interval_sec", 30) * 1000
         self.after(interval, self._on_scheduled_refresh)
 
