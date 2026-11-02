@@ -23,6 +23,12 @@ import pystray
 
 from gemini_web_client import GeminiWebClient
 
+# Modo auxiliar para captura de cookies via WebView2
+if "--login-webview" in sys.argv:
+    from gemini_login_window import run_login_window
+    run_login_window()
+    sys.exit(0)
+
 # Diretório base para persistência (suporte a script .py e executável .exe)
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -229,7 +235,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.available_groups = available_groups
 
         self.title("Configurações de Cotas e Modelos")
-        self.geometry("340x480")
+        self.geometry("360x520")
         self.resizable(False, False)
         self.attributes("-topmost", True)
         self.transient(parent)
@@ -292,7 +298,7 @@ class SettingsWindow(ctk.CTkToplevel):
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color="#ffffff",
         )
-        lbl_sec2.pack(anchor="w", padx=8, pady=(4, 4))
+        lbl_sec2.pack(anchor="w", padx=8, pady=(6, 4))
 
         web_box = ctk.CTkFrame(scroll_main, fg_color="#1e1e28", corner_radius=8)
         web_box.pack(fill="x", padx=6, pady=(0, 10))
@@ -307,19 +313,50 @@ class SettingsWindow(ctk.CTkToplevel):
             checkbox_height=18,
             corner_radius=4,
         )
-        self.chk_web.pack(anchor="w", padx=10, pady=(8, 6))
+        self.chk_web.pack(anchor="w", padx=10, pady=(10, 8))
+
+        # Botão de Login Direto com Captura Automática
+        self.btn_login = ctk.CTkButton(
+            web_box,
+            text="🌐 Fazer Login no Gemini (Captura Automática)",
+            height=32,
+            fg_color="#1a73e8",
+            hover_color="#1557b0",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._start_login_flow,
+        )
+        self.btn_login.pack(fill="x", padx=10, pady=(0, 4))
+
+        self.lbl_login_status = ctk.CTkLabel(
+            web_box,
+            text="Abre o navegador oficial para login; captura os cookies sozinho.",
+            font=ctk.CTkFont(size=10),
+            text_color="#888899",
+            justify="left",
+            wraplength=310,
+        )
+        self.lbl_login_status.pack(anchor="w", padx=10, pady=(0, 8))
+
+        # Separador / Opção Manual
+        lbl_or = ctk.CTkLabel(
+            web_box,
+            text="─── ou configurar cookies manualmente ───",
+            font=ctk.CTkFont(size=10),
+            text_color="#555566",
+        )
+        lbl_or.pack(fill="x", padx=10, pady=(2, 6))
 
         lbl_cookie = ctk.CTkLabel(
             web_box,
-            text="Cookie de Sessão (__Secure-1PSID):",
+            text="Cookies de Sessão:",
             font=ctk.CTkFont(size=11),
             text_color="#cccccc",
         )
-        lbl_cookie.pack(anchor="w", padx=10, pady=(4, 2))
+        lbl_cookie.pack(anchor="w", padx=10, pady=(2, 2))
 
         self.entry_cookie = ctk.CTkEntry(
             web_box,
-            placeholder_text="Cole o valor de __Secure-1PSID ou o cabeçalho Cookie",
+            placeholder_text="Cookies capturados automaticamente pelo botão acima",
             height=28,
             font=ctk.CTkFont(size=11),
         )
@@ -328,22 +365,13 @@ class SettingsWindow(ctk.CTkToplevel):
             self.entry_cookie.insert(0, saved_cookie)
         self.entry_cookie.pack(fill="x", padx=10, pady=(0, 6))
 
-        lbl_hint = ctk.CTkLabel(
-            web_box,
-            text="Dica: No gemini.google.com pressione F12 > Aplicativo >\nCookies > copie o valor de __Secure-1PSID.",
-            font=ctk.CTkFont(size=10),
-            text_color="#888899",
-            justify="left",
-        )
-        lbl_hint.pack(anchor="w", padx=10, pady=(0, 8))
-
         # Botão Testar Conexão
         self.lbl_test_result = ctk.CTkLabel(web_box, text="", font=ctk.CTkFont(size=10))
         self.lbl_test_result.pack(anchor="w", padx=10, pady=(0, 4))
 
         self.btn_test = ctk.CTkButton(
             web_box,
-            text="Testar Conexão do Gemini Web",
+            text="Testar Conexão Atual",
             width=180,
             height=26,
             fg_color="#2b2b36",
@@ -379,11 +407,65 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         btn_save.pack(side="right")
 
+    def _start_login_flow(self):
+        """Dispara o processo auxiliar de login via WebView nativo para captura automática de cookies."""
+        self.btn_login.configure(state="disabled", text="Abrindo navegador de login...")
+        self.lbl_login_status.configure(
+            text="Aguardando você fazer login na janela aberta...",
+            text_color="#3b8ed0",
+        )
+
+        def login_worker():
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--login-webview"]
+            else:
+                cmd = [sys.executable, os.path.join(BASE_DIR, "gemini_login_window.py")]
+
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+                output, _ = proc.communicate()
+
+                captured = False
+                for line in output.splitlines():
+                    if line.startswith("LOGIN_SUCCESS:"):
+                        payload = json.loads(line[len("LOGIN_SUCCESS:"):])
+                        cookie_hdr = payload.get("cookie_header", "")
+                        if cookie_hdr:
+                            captured = True
+                            self.after(0, lambda: self._on_login_success(cookie_hdr))
+                            break
+
+                if not captured:
+                    self.after(0, lambda: self._on_login_ended("Login não concluído ou janela fechada."))
+            except Exception as e:
+                self.after(0, lambda: self._on_login_ended(f"Erro ao iniciar login: {e}"))
+
+        threading.Thread(target=login_worker, daemon=True).start()
+
+    def _on_login_success(self, cookie_hdr: str):
+        self.btn_login.configure(state="normal", text="🌐 Fazer Login no Gemini (Captura Automática)")
+        self.lbl_login_status.configure(text="✓ Cookies capturados com sucesso!", text_color="#10b981")
+        self.var_web_enabled.set(True)
+        self.entry_cookie.delete(0, "end")
+        self.entry_cookie.insert(0, cookie_hdr)
+        self._test_gemini_web_connection()
+
+    def _on_login_ended(self, msg: str):
+        self.btn_login.configure(state="normal", text="🌐 Fazer Login no Gemini (Captura Automática)")
+        self.lbl_login_status.configure(text=f"⚠ {msg}", text_color="#f59e0b")
+
     def _test_gemini_web_connection(self):
         """Testa o cookie fornecido em segundo plano."""
         cookie_text = self.entry_cookie.get().strip()
         if not cookie_text:
-            self.lbl_test_result.configure(text="⚠ Cole o cookie antes de testar.", text_color="#ef4444")
+            self.lbl_test_result.configure(text="⚠ Nenhum cookie configurado para testar.", text_color="#ef4444")
             return
 
         self.btn_test.configure(state="disabled", text="Testando...")
@@ -393,7 +475,7 @@ class SettingsWindow(ctk.CTkToplevel):
             client = GeminiWebClient(cookie_text)
             quota = client.fetch_quota(force_refresh=True)
             if quota:
-                msg = f"✓ Conectado! (Uso: {quota.get('current_used_pct')}%)"
+                msg = f"✓ Conectado! (Uso Atual: {quota.get('current_used_pct')}%)"
                 col = "#10b981"
             else:
                 err = client.last_error or "Falha de autenticação"
@@ -405,7 +487,7 @@ class SettingsWindow(ctk.CTkToplevel):
         threading.Thread(target=run_test, daemon=True).start()
 
     def _show_test_result(self, msg: str, color: str):
-        self.btn_test.configure(state="normal", text="Testar Conexão do Gemini Web")
+        self.btn_test.configure(state="normal", text="Testar Conexão Atual")
         self.lbl_test_result.configure(text=msg, text_color=color)
 
     def _save(self):

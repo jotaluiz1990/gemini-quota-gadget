@@ -23,9 +23,13 @@ python -m PyInstaller ^
     --clean ^
     --name "GeminiQuotaGadget" ^
     --add-data "!CTK_PATH!;customtkinter/" ^
+    --collect-all "webview" ^
     --hidden-import "pystray" ^
     --hidden-import "PIL" ^
     --hidden-import "gemini_web_client" ^
+    --hidden-import "gemini_login_window" ^
+    --hidden-import "clr_loader" ^
+    --hidden-import "pythonnet" ^
     main.py
 
 if %ERRORLEVEL% EQU 0 (
