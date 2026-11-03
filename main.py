@@ -102,6 +102,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "gemini_web_cookie": "",
     "last_known_quota": None,
     "last_known_gemini_web": None,
+    "font_size": "Médio",
+    "opacity": 0.95,
+    "display_mode": "% Restante",
 }
 
 MIN_WIDTH = 230
@@ -409,7 +412,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.available_groups = available_groups
 
         self.title("Configurações de Cotas e Modelos")
-        self.geometry("360x560")
+        self.geometry("380x620")
         self.resizable(False, False)
         self.attributes("-topmost", True)
         self.transient(parent)
@@ -418,9 +421,11 @@ class SettingsWindow(ctk.CTkToplevel):
         py = parent.winfo_y() - 30
         self.geometry(f"+{max(10, px)}+{max(10, py)}")
 
+        self.initial_opacity = float(self.parent.settings.get("opacity", 0.95))
         self.check_vars: Dict[str, ctk.BooleanVar] = {}
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.grab_set()
         self.focus_force()
 
@@ -555,14 +560,80 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         self.btn_test.pack(anchor="w", padx=10, pady=(0, 10))
 
-        # Seção 3: Sistema e Inicialização
+        # Seção 3: Aparência e Visualização
         lbl_sec3 = ctk.CTkLabel(
+            scroll_main,
+            text="Aparência e Visualização",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#ffffff",
+        )
+        lbl_sec3.pack(anchor="w", padx=8, pady=(6, 4))
+
+        style_box = ctk.CTkFrame(scroll_main, fg_color="#1e1e28", corner_radius=8)
+        style_box.pack(fill="x", padx=6, pady=(0, 10))
+
+        # 1. Tamanho da Fonte
+        lbl_font = ctk.CTkLabel(
+            style_box,
+            text="Tamanho da Fonte:",
+            font=ctk.CTkFont(size=11),
+            text_color="#cccccc",
+        )
+        lbl_font.pack(anchor="w", padx=10, pady=(8, 2))
+
+        self.seg_font = ctk.CTkSegmentedButton(
+            style_box,
+            values=["Pequeno", "Médio", "Grande"],
+            font=ctk.CTkFont(size=11),
+        )
+        self.seg_font.set(self.parent.settings.get("font_size", "Médio"))
+        self.seg_font.pack(fill="x", padx=10, pady=(0, 8))
+
+        # 2. Opacidade da Janela
+        self.var_opacity = ctk.DoubleVar(value=self.initial_opacity)
+        self.lbl_opacity_val = ctk.CTkLabel(
+            style_box,
+            text=f"Opacidade da Janela: {int(self.initial_opacity * 100)}%",
+            font=ctk.CTkFont(size=11),
+            text_color="#cccccc",
+        )
+        self.lbl_opacity_val.pack(anchor="w", padx=10, pady=(4, 2))
+
+        self.slider_opacity = ctk.CTkSlider(
+            style_box,
+            from_=0.40,
+            to=1.0,
+            number_of_steps=12,
+            variable=self.var_opacity,
+            command=self._on_opacity_slider,
+        )
+        self.slider_opacity.pack(fill="x", padx=10, pady=(0, 8))
+
+        # 3. Modo de Exibição das Cotas
+        lbl_mode = ctk.CTkLabel(
+            style_box,
+            text="Modo de Exibição das Cotas:",
+            font=ctk.CTkFont(size=11),
+            text_color="#cccccc",
+        )
+        lbl_mode.pack(anchor="w", padx=10, pady=(4, 2))
+
+        self.seg_mode = ctk.CTkSegmentedButton(
+            style_box,
+            values=["% Restante", "% Consumida"],
+            font=ctk.CTkFont(size=11),
+        )
+        self.seg_mode.set(self.parent.settings.get("display_mode", "% Restante"))
+        self.seg_mode.pack(fill="x", padx=10, pady=(0, 10))
+
+        # Seção 4: Sistema e Inicialização
+        lbl_sec4 = ctk.CTkLabel(
             scroll_main,
             text="Sistema e Inicialização",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color="#ffffff",
         )
-        lbl_sec3.pack(anchor="w", padx=8, pady=(6, 4))
+        lbl_sec4.pack(anchor="w", padx=8, pady=(6, 4))
 
         sys_box = ctk.CTkFrame(scroll_main, fg_color="#1e1e28", corner_radius=8)
         sys_box.pack(fill="x", padx=6, pady=(0, 10))
@@ -590,7 +661,7 @@ class SettingsWindow(ctk.CTkToplevel):
             border_width=1,
             border_color="#444444",
             hover_color="#2c2c34",
-            command=self.destroy,
+            command=self._on_cancel,
         )
         btn_cancel.pack(side="left")
 
@@ -693,6 +764,16 @@ class SettingsWindow(ctk.CTkToplevel):
         self.btn_test.configure(state="normal", text="Testar Conexão Atual")
         self.lbl_test_result.configure(text=msg, text_color=color)
 
+    def _on_opacity_slider(self, val: float):
+        pct = int(round(val * 100))
+        self.lbl_opacity_val.configure(text=f"Opacidade da Janela: {pct}%")
+        self.parent.attributes("-alpha", max(0.3, min(1.0, val)))
+
+    def _on_cancel(self):
+        # Restaura a opacidade original se o usuário cancelar
+        self.parent.attributes("-alpha", self.initial_opacity)
+        self.destroy()
+
     def _on_autostart_toggle(self):
         set_autostart_enabled(self.var_autostart.get())
 
@@ -704,6 +785,14 @@ class SettingsWindow(ctk.CTkToplevel):
         self.parent.settings["visible_groups"] = new_visible
         self.parent.settings["gemini_web_enabled"] = self.var_web_enabled.get()
         self.parent.settings["gemini_web_cookie"] = self.entry_cookie.get().strip()
+
+        # Novas configurações visuais
+        chosen_opacity = round(self.var_opacity.get(), 2)
+        self.parent.settings["opacity"] = chosen_opacity
+        self.parent.attributes("-alpha", chosen_opacity)
+
+        self.parent.settings["font_size"] = self.seg_font.get()
+        self.parent.settings["display_mode"] = self.seg_mode.get()
 
         # Atualiza o cliente Gemini Web no pai
         self.parent.web_client.set_cookies(self.parent.settings["gemini_web_cookie"])
@@ -782,6 +871,10 @@ class GeminiQuotaWidget(ctk.CTk):
         # Cantos arredondados: cor transparente na raiz + DWM Windows 11
         self.setup_rounded_corners()
 
+        # Aplica opacidade configurada (0.4 a 1.0)
+        opacity = float(self.settings.get("opacity", 0.95))
+        self.attributes("-alpha", max(0.3, min(1.0, opacity)))
+
         # Variáveis de arraste de posição
         self._drag_offset_x = 0
         self._drag_offset_y = 0
@@ -811,6 +904,54 @@ class GeminiQuotaWidget(ctk.CTk):
 
         # Bandeja do sistema
         self.start_system_tray()
+
+    def get_font_sizes(self) -> Dict[str, int]:
+        """Retorna tamanhos das fontes e componentes baseado na escala configurada."""
+        mode = self.settings.get("font_size", "Médio")
+        if mode == "Grande":
+            return {
+                "title": 15,
+                "card_title": 14,
+                "badge": 10,
+                "banner": 11,
+                "label": 13,
+                "value": 13,
+                "reset": 11,
+                "footer": 11,
+                "bar_h": 8,
+            }
+        elif mode == "Pequeno":
+            return {
+                "title": 12,
+                "card_title": 11,
+                "badge": 9,
+                "banner": 10,
+                "label": 11,
+                "value": 11,
+                "reset": 10,
+                "footer": 10,
+                "bar_h": 6,
+            }
+        else:  # "Médio" (Padrão confortavelmente aumentado)
+            return {
+                "title": 13,
+                "card_title": 13,
+                "badge": 9,
+                "banner": 10,
+                "label": 12,
+                "value": 12,
+                "reset": 10,
+                "footer": 10,
+                "bar_h": 7,
+            }
+
+    def apply_font_sizes(self):
+        """Aplica os tamanhos de fonte aos componentes fixos da interface."""
+        fonts = self.get_font_sizes()
+        if hasattr(self, "lbl_app_title"):
+            self.lbl_app_title.configure(font=ctk.CTkFont(size=fonts["title"], weight="bold"))
+        if hasattr(self, "lbl_footer"):
+            self.lbl_footer.configure(font=ctk.CTkFont(size=fonts["footer"]))
 
     def setup_rounded_corners(self):
         """Aplica cantos arredondados reais via transparência de cor e API DWM do Windows."""
@@ -857,10 +998,11 @@ class GeminiQuotaWidget(ctk.CTk):
         )
         self.status_dot.pack(side="left", padx=(0, 4))
 
+        fonts = self.get_font_sizes()
         self.lbl_app_title = ctk.CTkLabel(
             self.top_bar,
             text="Antigravity Quota",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(size=fonts["title"], weight="bold"),
             text_color="#ffffff",
         )
         self.lbl_app_title.pack(side="left")
@@ -932,7 +1074,7 @@ class GeminiQuotaWidget(ctk.CTk):
         self.lbl_footer = ctk.CTkLabel(
             self.bottom_bar,
             text="Atualizando...",
-            font=ctk.CTkFont(size=10),
+            font=ctk.CTkFont(size=fonts["footer"]),
             text_color="#777788",
         )
         self.lbl_footer.pack(side="left", padx=(4, 0))
@@ -1044,16 +1186,19 @@ class GeminiQuotaWidget(ctk.CTk):
             pass
 
     def load_settings(self):
-        """Carrega preferências salvas ou migra esquema."""
+        """Carrega preferências salvas ou migra esquema com merge dos novos campos."""
         if os.path.exists(DATA_FILE):
             try:
                 with open(DATA_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    if "visible_groups" in data:
-                        self.settings = data
-                        return
-                    elif "window_state" in data:
-                        self.settings["window_state"] = data.get("window_state", {})
+                    if isinstance(data, dict):
+                        merged = dict(DEFAULT_SETTINGS)
+                        merged.update(data)
+                        if "window_state" in data and isinstance(data["window_state"], dict):
+                            ws = dict(DEFAULT_SETTINGS["window_state"])
+                            ws.update(data["window_state"])
+                            merged["window_state"] = ws
+                        self.settings = merged
                         return
             except Exception as e:
                 print(f"Erro ao ler settings: {e}")
@@ -1166,6 +1311,7 @@ class GeminiQuotaWidget(ctk.CTk):
 
     def full_rebuild_cards(self):
         """Limpa referências para reconstrução completa ao alterar seleção nas configurações."""
+        self.apply_font_sizes()
         for widget in self.content_scroll.winfo_children():
             widget.destroy()
         self.rendered_cards.clear()
@@ -1188,6 +1334,8 @@ class GeminiQuotaWidget(ctk.CTk):
     ):
         """Atualiza valores dos widgets de modelos do Antigravity em tempo real sem recriação (Zero Flicker)."""
         visible_set = set(self.settings.get("visible_groups", []))
+        display_mode = self.settings.get("display_mode", "% Restante")
+        fonts = self.get_font_sizes()
 
         active_rendered_groups = set(self.rendered_cards.keys())
         wanted_groups = {g.get("displayName") for g in groups if g.get("displayName") in visible_set}
@@ -1222,7 +1370,7 @@ class GeminiQuotaWidget(ctk.CTk):
                 lbl_name = ctk.CTkLabel(
                     header,
                     text=group_name,
-                    font=ctk.CTkFont(size=12, weight="bold"),
+                    font=ctk.CTkFont(size=fonts["card_title"], weight="bold"),
                     text_color="#ffffff",
                 )
                 lbl_name.pack(side="left")
@@ -1230,7 +1378,7 @@ class GeminiQuotaWidget(ctk.CTk):
                 badge_est = ctk.CTkLabel(
                     header,
                     text="⚠ ESTIMADO",
-                    font=ctk.CTkFont(size=9, weight="bold"),
+                    font=ctk.CTkFont(size=fonts["badge"], weight="bold"),
                     fg_color="#d97706",
                     text_color="#18181f",
                     corner_radius=4,
@@ -1242,7 +1390,7 @@ class GeminiQuotaWidget(ctk.CTk):
                 lbl_banner = ctk.CTkLabel(
                     card,
                     text="",
-                    font=ctk.CTkFont(size=10),
+                    font=ctk.CTkFont(size=fonts["banner"]),
                     text_color="#f59e0b",
                     anchor="w",
                 )
@@ -1271,8 +1419,18 @@ class GeminiQuotaWidget(ctk.CTk):
                 key = (group_name, bucket_id)
 
                 fraction = float(b.get("remainingFraction", 1.0))
-                pct = round(fraction * 100, 1)
-                color = get_color_for_remaining(fraction)
+                if display_mode == "% Consumida":
+                    fraction_used = max(0.0, min(1.0, 1.0 - fraction))
+                    pct_val = round(fraction_used * 100, 1)
+                    val_text = f"{pct_val}% consumido"
+                    bar_val = fraction_used
+                    color = get_color_for_used(fraction_used)
+                else:
+                    pct_val = round(fraction * 100, 1)
+                    val_text = f"{pct_val}% restante"
+                    bar_val = max(0.0, min(1.0, fraction))
+                    color = get_color_for_remaining(fraction)
+
                 window_name = "Limite 5 Horas" if b.get("window") == "5h" else "Limite Semanal"
                 is_restored = bool(b.get("is_reset_restored", False))
                 reset_text = format_reset_info(b.get("resetTime"), is_restored=is_restored)
@@ -1287,15 +1445,15 @@ class GeminiQuotaWidget(ctk.CTk):
                     lbl_win = ctk.CTkLabel(
                         row1,
                         text=window_name,
-                        font=ctk.CTkFont(size=11),
+                        font=ctk.CTkFont(size=fonts["label"]),
                         text_color="#aaaaaa",
                     )
                     lbl_win.pack(side="left")
 
                     lbl_pct = ctk.CTkLabel(
                         row1,
-                        text=f"{pct}% restante",
-                        font=ctk.CTkFont(size=11, weight="bold"),
+                        text=val_text,
+                        font=ctk.CTkFont(size=fonts["value"], weight="bold"),
                         text_color=color,
                     )
                     lbl_pct.pack(side="right")
@@ -1303,17 +1461,17 @@ class GeminiQuotaWidget(ctk.CTk):
                     pbar = ctk.CTkProgressBar(
                         bucket_frame,
                         width=210,
-                        height=6,
+                        height=fonts["bar_h"],
                         corner_radius=3,
                         progress_color=color,
                     )
-                    pbar.set(max(0.0, min(1.0, fraction)))
+                    pbar.set(bar_val)
                     pbar.pack(fill="x", pady=(2, 2))
 
                     lbl_reset = ctk.CTkLabel(
                         bucket_frame,
                         text=reset_text,
-                        font=ctk.CTkFont(size=10),
+                        font=ctk.CTkFont(size=fonts["reset"]),
                         text_color="#888899",
                     )
                     lbl_reset.pack(anchor="w")
@@ -1325,8 +1483,8 @@ class GeminiQuotaWidget(ctk.CTk):
                     }
                 else:
                     w = self.bucket_widgets[key]
-                    w["lbl_pct"].configure(text=f"{pct}% restante", text_color=color)
-                    w["pbar"].set(max(0.0, min(1.0, fraction)))
+                    w["lbl_pct"].configure(text=val_text, text_color=color)
+                    w["pbar"].set(bar_val)
                     w["pbar"].configure(progress_color=color)
                     w["lbl_reset"].configure(text=reset_text)
 
@@ -1337,6 +1495,9 @@ class GeminiQuotaWidget(ctk.CTk):
         last_read_str: str = "",
     ):
         """Renderiza ou atualiza o card do Gemini Web (PRO) com dados reais ou previstos."""
+        display_mode = self.settings.get("display_mode", "% Restante")
+        fonts = self.get_font_sizes()
+
         if self.gemini_web_card is None:
             card = ctk.CTkFrame(
                 self.content_scroll,
@@ -1356,7 +1517,7 @@ class GeminiQuotaWidget(ctk.CTk):
             lbl_title = ctk.CTkLabel(
                 header,
                 text="Gemini Web",
-                font=ctk.CTkFont(size=12, weight="bold"),
+                font=ctk.CTkFont(size=fonts["card_title"], weight="bold"),
                 text_color="#ffffff",
             )
             lbl_title.pack(side="left")
@@ -1364,7 +1525,7 @@ class GeminiQuotaWidget(ctk.CTk):
             tag_pro = ctk.CTkLabel(
                 header,
                 text="PRO",
-                font=ctk.CTkFont(size=9, weight="bold"),
+                font=ctk.CTkFont(size=fonts["badge"], weight="bold"),
                 fg_color="#3b8ed0",
                 corner_radius=4,
                 text_color="#ffffff",
@@ -1376,7 +1537,7 @@ class GeminiQuotaWidget(ctk.CTk):
             badge_est = ctk.CTkLabel(
                 header,
                 text="⚠ ESTIMADO",
-                font=ctk.CTkFont(size=9, weight="bold"),
+                font=ctk.CTkFont(size=fonts["badge"], weight="bold"),
                 fg_color="#d97706",
                 text_color="#18181f",
                 corner_radius=4,
@@ -1388,7 +1549,7 @@ class GeminiQuotaWidget(ctk.CTk):
             lbl_banner = ctk.CTkLabel(
                 card,
                 text="",
-                font=ctk.CTkFont(size=10),
+                font=ctk.CTkFont(size=fonts["banner"]),
                 text_color="#f59e0b",
                 anchor="w",
             )
@@ -1400,16 +1561,16 @@ class GeminiQuotaWidget(ctk.CTk):
 
             row1 = ctk.CTkFrame(b1, fg_color="transparent")
             row1.pack(fill="x")
-            lbl_b1_title = ctk.CTkLabel(row1, text="Uso Atual", font=ctk.CTkFont(size=11), text_color="#aaaaaa")
+            lbl_b1_title = ctk.CTkLabel(row1, text="Uso Atual", font=ctk.CTkFont(size=fonts["label"]), text_color="#aaaaaa")
             lbl_b1_title.pack(side="left")
-            lbl_b1_val = ctk.CTkLabel(row1, text="--%", font=ctk.CTkFont(size=11, weight="bold"), text_color="#10b981")
+            lbl_b1_val = ctk.CTkLabel(row1, text="--%", font=ctk.CTkFont(size=fonts["value"], weight="bold"), text_color="#10b981")
             lbl_b1_val.pack(side="right")
 
-            pbar1 = ctk.CTkProgressBar(b1, width=210, height=6, corner_radius=3, progress_color="#10b981")
+            pbar1 = ctk.CTkProgressBar(b1, width=210, height=fonts["bar_h"], corner_radius=3, progress_color="#10b981")
             pbar1.set(0)
             pbar1.pack(fill="x", pady=(2, 2))
 
-            lbl_b1_reset = ctk.CTkLabel(b1, text="Aguardando dados...", font=ctk.CTkFont(size=10), text_color="#888899")
+            lbl_b1_reset = ctk.CTkLabel(b1, text="Aguardando dados...", font=ctk.CTkFont(size=fonts["reset"]), text_color="#888899")
             lbl_b1_reset.pack(anchor="w")
 
             # Bloco 2: Limite Semanal
@@ -1418,16 +1579,16 @@ class GeminiQuotaWidget(ctk.CTk):
 
             row2 = ctk.CTkFrame(b2, fg_color="transparent")
             row2.pack(fill="x")
-            lbl_b2_title = ctk.CTkLabel(row2, text="Limite Semanal", font=ctk.CTkFont(size=11), text_color="#aaaaaa")
+            lbl_b2_title = ctk.CTkLabel(row2, text="Limite Semanal", font=ctk.CTkFont(size=fonts["label"]), text_color="#aaaaaa")
             lbl_b2_title.pack(side="left")
-            lbl_b2_val = ctk.CTkLabel(row2, text="--%", font=ctk.CTkFont(size=11, weight="bold"), text_color="#10b981")
+            lbl_b2_val = ctk.CTkLabel(row2, text="--%", font=ctk.CTkFont(size=fonts["value"], weight="bold"), text_color="#10b981")
             lbl_b2_val.pack(side="right")
 
-            pbar2 = ctk.CTkProgressBar(b2, width=210, height=6, corner_radius=3, progress_color="#10b981")
+            pbar2 = ctk.CTkProgressBar(b2, width=210, height=fonts["bar_h"], corner_radius=3, progress_color="#10b981")
             pbar2.set(0)
             pbar2.pack(fill="x", pady=(2, 2))
 
-            lbl_b2_reset = ctk.CTkLabel(b2, text="Aguardando dados...", font=ctk.CTkFont(size=10), text_color="#888899")
+            lbl_b2_reset = ctk.CTkLabel(b2, text="Aguardando dados...", font=ctk.CTkFont(size=fonts["reset"]), text_color="#888899")
             lbl_b2_reset.pack(anchor="w")
 
             self.gemini_web_widgets = {
@@ -1458,26 +1619,40 @@ class GeminiQuotaWidget(ctk.CTk):
         # Atualiza dados se disponíveis
         w = self.gemini_web_widgets
         if data:
-            # Bloco 1: Uso Atual (exibe % restante unificada com a mesma identidade visual)
-            c_rem = data.get("current_remaining_pct", round(max(0.0, 100.0 - data.get("current_used_pct", 0.0)), 1))
-            c_frac = max(0.0, min(1.0, c_rem / 100.0))
-            c_col = get_color_for_remaining(c_frac)
-            c_reset = data.get("current_reset_text", "Limite redefinido em breve")
+            c_used = data.get("current_used_pct", 0.0)
+            c_rem = data.get("current_remaining_pct", round(max(0.0, 100.0 - c_used), 1))
+            if display_mode == "% Consumida":
+                c_frac = max(0.0, min(1.0, c_used / 100.0))
+                c_col = get_color_for_used(c_frac)
+                w["b1_val"].configure(text=f"{c_used}% consumido", text_color=c_col)
+                w["b1_bar"].set(c_frac)
+                w["b1_bar"].configure(progress_color=c_col)
+            else:
+                c_frac = max(0.0, min(1.0, c_rem / 100.0))
+                c_col = get_color_for_remaining(c_frac)
+                w["b1_val"].configure(text=f"{c_rem}% restante", text_color=c_col)
+                w["b1_bar"].set(c_frac)
+                w["b1_bar"].configure(progress_color=c_col)
 
-            w["b1_val"].configure(text=f"{c_rem}% restante", text_color=c_col)
-            w["b1_bar"].set(c_frac)
-            w["b1_bar"].configure(progress_color=c_col)
+            c_reset = data.get("current_reset_text", "Limite redefinido em breve")
             w["b1_reset"].configure(text=c_reset)
 
-            # Bloco 2: Limite Semanal (exibe % restante unificada)
-            w_rem = data.get("weekly_remaining_pct", round(max(0.0, 100.0 - data.get("weekly_used_pct", 0.0)), 1))
-            w_frac = max(0.0, min(1.0, w_rem / 100.0))
-            w_col = get_color_for_remaining(w_frac)
-            w_reset = data.get("weekly_reset_text", "Limite semanal redefinido em breve")
+            w_used = data.get("weekly_used_pct", 0.0)
+            w_rem = data.get("weekly_remaining_pct", round(max(0.0, 100.0 - w_used), 1))
+            if display_mode == "% Consumida":
+                w_frac = max(0.0, min(1.0, w_used / 100.0))
+                w_col = get_color_for_used(w_frac)
+                w["b2_val"].configure(text=f"{w_used}% consumido", text_color=w_col)
+                w["b2_bar"].set(w_frac)
+                w["b2_bar"].configure(progress_color=w_col)
+            else:
+                w_frac = max(0.0, min(1.0, w_rem / 100.0))
+                w_col = get_color_for_remaining(w_frac)
+                w["b2_val"].configure(text=f"{w_rem}% restante", text_color=w_col)
+                w["b2_bar"].set(w_frac)
+                w["b2_bar"].configure(progress_color=w_col)
 
-            w["b2_val"].configure(text=f"{w_rem}% restante", text_color=w_col)
-            w["b2_bar"].set(w_frac)
-            w["b2_bar"].configure(progress_color=w_col)
+            w_reset = data.get("weekly_reset_text", "Limite semanal redefinido em breve")
             w["b2_reset"].configure(text=w_reset)
         else:
             err = self.web_client.last_error or "Aguardando autenticação (abra ⚙)"

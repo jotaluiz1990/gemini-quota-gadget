@@ -38,6 +38,11 @@ Widget flutuante moderno para desktop que monitora em tempo real suas cotas de u
   - Esqueça a necessidade de abrir o DevTools (F12) para copiar cookies manuais.
   - Clique em **"Fazer Login no Gemini"** dentro das Configurações (`⚙`): uma janela nativa do Microsoft Edge WebView2 é aberta, você faz login na sua conta Google e o gadget **captura os cookies de sessão (`__Secure-1PSID`) e fecha automaticamente**.
 
+- 🎨 **Personalização Visual e Controle Total**:
+  - **Tamanho da Fonte Customizável**: Alterne entre `Pequeno` (compacto), `Médio` (padrão ampliado para leitura confortável) e `Grande` (ideal para monitores de alta resolução).
+  - **Opacidade do Fundo com Preview em Tempo Real**: Ajuste o controle deslizante de 40% a 100% de transparência para integrar o gadget perfeitamente ao seu papel de parede.
+  - **Modo de Exibição das Porcentagens**: Escolha visualizar suas cotas como **% Restante** (quanto ainda tem) ou **% Consumida** (quanto já gastou), com adaptação automática das cores das barras.
+
 - 📌 **Bandeja do Sistema (System Tray) & Inicialização com Windows**:
   - Não polui a barra de tarefas do Windows. Ao clicar no `✕`, o gadget se oculta diretamente na bandeja ao lado do relógio.
   - Menu da bandeja com opções de: *Mostrar Widget*, *Configurações*, *Atualizar Agora* e *Sair*.
@@ -82,7 +87,11 @@ Abra o menu de configurações clicando no ícone de engrenagem (**⚙**) no top
    - Marque a caixa *Ativar Monitoramento do Gemini Web (PRO)*.
    - Clique em **🌐 Fazer Login no Gemini (Captura Automática)**.
    - Uma janela de navegador seguro será aberta para autenticação na sua conta Google. Assim que você entrar, a janela fecha sozinha e os limites de uso passam a ser monitorados!
-3. **Sistema e Inicialização**:
+3. **Aparência e Visualização**:
+   - **Tamanho da Fonte**: Selecione entre `Pequeno`, `Médio` ou `Grande`.
+   - **Opacidade da Janela**: Ajuste o slider para ver a janela se tornar translúcida na hora (ao vivo).
+   - **Modo de Exibição das Cotas**: Selecione `% Restante` ou `% Consumida`.
+4. **Sistema e Inicialização**:
    - Ative a opção *Iniciar automaticamente com o Windows* para o gadget carregar pronto sempre que você ligar o computador.
 
 ---
