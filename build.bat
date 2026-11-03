@@ -10,7 +10,9 @@ for /f "delims=" %%i in ('python -c "import customtkinter, os; print(os.path.dir
 
 if "%CTK_PATH%"=="" (
     echo [ERRO] Nao foi possivel localizar o pacote CustomTkinter. Verifique a instalacao do Python.
+    if "%~1"=="" (
     pause
+)
     exit /b 1
 )
 
@@ -43,4 +45,6 @@ if %ERRORLEVEL% EQU 0 (
     echo [ERRO] Ocorreu uma falha durante o processo de build do PyInstaller.
 )
 
-pause
+if "%~1"=="" (
+    pause
+)

@@ -7,7 +7,7 @@ para exibir o consumo real e contagem regressiva + data/hora de reset dos modelo
 
 import copy
 import ctypes
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
@@ -115,50 +115,150 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
+def _run_hidden_cmd(cmd_list: List[str], timeout_sec: float = 6.0) -> str:
+    """Executa comando em segundo plano no Windows sem NUNCA abrir janela de console (Zero Popup)."""
+    si = None
+    flags = 0
+    if sys.platform == "win32":
+        flags |= 0x08000000  # CREATE_NO_WINDOW
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+    try:
+        return subprocess.check_output(
+            cmd_list,
+            text=True,
+            errors="ignore",
+            startupinfo=si,
+            creationflags=flags,
+            timeout=timeout_sec,
+        ).strip()
+    except Exception:
+        return ""
+
+
+def parse_to_utc_datetime(iso_val: Optional[Any]) -> Optional[datetime]:
+    """Converte com segurança qualquer string ISO ou timestamp para datetime ciente em UTC."""
+    if not iso_val:
+        return None
+    try:
+        if isinstance(iso_val, (int, float)):
+            ts = float(iso_val)
+            if ts > 1e11:
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+        s = str(iso_val).strip()
+        if s.isdigit():
+            ts = float(s)
+            if ts > 1e11:
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
 def calculate_projected_ag_data(last_known: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
     """Calcula os valores previstos para cada bucket com base na data/hora de reset salva."""
     groups = copy.deepcopy(last_known.get("groups", []))
     saved_ts = last_known.get("timestamp", "")
     last_read_str = ""
     if saved_ts:
-        try:
-            dt = datetime.fromisoformat(saved_ts).astimezone()
-            last_read_str = dt.strftime("%H:%M")
-        except Exception:
-            pass
+        dt = parse_to_utc_datetime(saved_ts)
+        if dt:
+            last_read_str = dt.astimezone().strftime("%H:%M")
 
     now_utc = datetime.now(timezone.utc)
 
     for group in groups:
         for b in group.get("buckets", []):
             reset_iso = b.get("resetTime")
-            if reset_iso:
-                try:
-                    iso_clean = reset_iso.replace("Z", "+00:00")
-                    target_utc = datetime.fromisoformat(iso_clean)
-                    diff_sec = int((target_utc - now_utc).total_seconds())
-                    if diff_sec <= 0:
-                        # O reset previsto já passou! A cota foi restabelecida para 100%!
-                        b["remainingFraction"] = 1.0
-                except Exception:
-                    pass
+            if not reset_iso:
+                continue
+
+            target_utc = parse_to_utc_datetime(reset_iso)
+            if not target_utc:
+                continue
+
+            diff_sec = int((target_utc - now_utc).total_seconds())
+            if diff_sec <= 0:
+                # O reset previsto já passou! A cota foi restabelecida para 100%!
+                b["remainingFraction"] = 1.0
+                b["is_reset_restored"] = True
+
+                window = b.get("window", "")
+                bucket_id = b.get("bucketId", "")
+
+                if window == "5h" or "-5h" in bucket_id:
+                    cycle = timedelta(hours=5)
+                elif window == "weekly" or "weekly" in bucket_id:
+                    cycle = timedelta(days=7)
+                else:
+                    cycle = timedelta(hours=5)
+
+                while target_utc <= now_utc:
+                    target_utc += cycle
+
+                b["resetTime"] = target_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return groups, last_read_str
 
 
-def format_reset_info(reset_time_iso: Optional[str]) -> str:
+def calculate_projected_gw_data(last_known: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """Calcula estimativa para o Gemini Web se a data/hora de reset já tiver passado."""
+    data = copy.deepcopy(last_known.get("data", {}))
+    saved_ts = last_known.get("timestamp", "")
+    last_read_str = ""
+    if saved_ts:
+        dt = parse_to_utc_datetime(saved_ts)
+        if dt:
+            last_read_str = dt.astimezone().strftime("%H:%M")
+
+    now_epoch = datetime.now(timezone.utc).timestamp()
+
+    # Reset Atual
+    cur_epoch = data.get("current_reset_epoch")
+    if cur_epoch and now_epoch >= cur_epoch:
+        data["current_remaining_pct"] = 100.0
+        data["current_used_pct"] = 0.0
+        data["current_reset_text"] = "⏱ Cota restaurada (100%)"
+
+    # Reset Semanal
+    wk_epoch = data.get("weekly_reset_epoch")
+    if wk_epoch and now_epoch >= wk_epoch:
+        data["weekly_remaining_pct"] = 100.0
+        data["weekly_used_pct"] = 0.0
+        data["weekly_reset_text"] = "⏱ Limite semanal restaurado (100%)"
+
+    return data, last_read_str
+
+
+def format_reset_info(reset_time_iso: Optional[str], is_restored: bool = False) -> str:
     """Calcula a contagem regressiva e a data/hora local de redefinição."""
     if not reset_time_iso:
         return ""
     try:
-        iso_clean = reset_time_iso.replace("Z", "+00:00")
-        target_utc = datetime.fromisoformat(iso_clean)
+        target_utc = parse_to_utc_datetime(reset_time_iso)
+        if not target_utc:
+            return ""
+
         local_dt = target_utc.astimezone()
         now_dt = datetime.now(timezone.utc)
         diff = target_utc - now_dt
         total_seconds = int(diff.total_seconds())
 
         if total_seconds <= 0:
+            if is_restored:
+                return "⏱ Cota restaurada (100%)"
             return f"⏱ Reset já ocorrido ({local_dt.strftime('%d/%m às %H:%M')})"
 
         days = total_seconds // 86400
@@ -176,6 +276,8 @@ def format_reset_info(reset_time_iso: Optional[str]) -> str:
             countdown = "<1m"
 
         date_str = local_dt.strftime("%d/%m às %H:%M")
+        if is_restored:
+            return f"⏱ Reseta em {countdown} • {date_str} (Restaurada)"
         return f"⏱ Reseta em {countdown} • {date_str}"
     except Exception:
         return ""
@@ -220,31 +322,28 @@ class AntigravityQuotaClient:
         self.cached_csrf: Optional[str] = None
 
     def fetch_quota(self) -> Optional[List[Dict[str, Any]]]:
-        """Tenta consultar utilizando dados cacheados; se falhar, redescobre o serviço."""
+        """Tenta consultar utilizando dados cacheados; se falhar, redescobre o serviço silenciosamente."""
         if self.cached_port and self.cached_csrf:
             data = self._query_port(self.cached_port, self.cached_csrf)
             if data is not None:
                 return data
 
-        if self._discover_service():
-            return self._query_port(self.cached_port, self.cached_csrf)
-        return None
+        # Porta em cache falhou ou não existe, limpa e redescobre
+        self.cached_port = None
+        self.cached_csrf = None
+        return self._discover_service()
 
-    def _discover_service(self) -> bool:
+    def _discover_service(self) -> Optional[List[Dict[str, Any]]]:
         """Localiza o language_server.exe, extrai a flag --csrf_token e descobre a porta de escuta."""
         try:
             ps_cmd = (
                 "Get-CimInstance Win32_Process -Filter \"Name = 'language_server.exe'\" | "
                 "Select-Object ProcessId, CommandLine | ConvertTo-Json"
             )
-            out = subprocess.check_output(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                text=True,
-                errors="ignore",
-            ).strip()
+            out = _run_hidden_cmd(["powershell", "-NoProfile", "-Command", ps_cmd])
 
             if not out:
-                return False
+                return None
 
             proc_info = json.loads(out)
             if isinstance(proc_info, list):
@@ -255,7 +354,7 @@ class AntigravityQuotaClient:
 
             csrf_match = re.search(r"--csrf_token\s+([a-f0-9\-]+)", cmdline)
             if not csrf_match or not pid:
-                return False
+                return None
 
             csrf_token = csrf_match.group(1)
 
@@ -263,11 +362,7 @@ class AntigravityQuotaClient:
                 f"Get-NetTCPConnection -OwningProcess {pid} -State Listen "
                 "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort"
             )
-            ports_out = subprocess.check_output(
-                ["powershell", "-NoProfile", "-Command", ports_cmd],
-                text=True,
-                errors="ignore",
-            ).strip()
+            ports_out = _run_hidden_cmd(["powershell", "-NoProfile", "-Command", ports_cmd])
 
             ports = [int(p) for p in ports_out.split() if p.isdigit()]
 
@@ -277,12 +372,11 @@ class AntigravityQuotaClient:
                     self.cached_pid = pid
                     self.cached_port = port
                     self.cached_csrf = csrf_token
-                    return True
+                    return data
 
-            return False
-        except Exception as e:
-            print(f"Aviso de descoberta do Antigravity: {e}")
-            return False
+            return None
+        except Exception:
+            return None
 
     def _query_port(self, port: int, csrf_token: str) -> Optional[List[Dict[str, Any]]]:
         """Executa a chamada Connect-RPC para RetrieveUserQuotaSummary."""
@@ -524,6 +618,11 @@ class SettingsWindow(ctk.CTkToplevel):
                 cmd = [sys.executable, os.path.join(BASE_DIR, "gemini_login_window.py")]
 
             try:
+                flags = 0x08000000 if sys.platform == "win32" else 0
+                si = subprocess.STARTUPINFO() if sys.platform == "win32" else None
+                if si:
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    si.wShowWindow = 0  # SW_HIDE
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -531,6 +630,8 @@ class SettingsWindow(ctk.CTkToplevel):
                     text=True,
                     encoding="utf-8",
                     errors="ignore",
+                    startupinfo=si,
+                    creationflags=flags,
                 )
                 output, _ = proc.communicate()
 
@@ -636,6 +737,7 @@ class GeminiQuotaWidget(ctk.CTk):
         self.card_banners: Dict[str, ctk.CTkLabel] = {}
         self.bucket_widgets: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self.gemini_web_card: Optional[ctk.CTkFrame] = None
+        self.gemini_web_header: Optional[ctk.CTkFrame] = None
         self.gemini_web_badge: Optional[ctk.CTkLabel] = None
         self.gemini_web_banner: Optional[ctk.CTkLabel] = None
         self.gemini_web_widgets: Dict[str, Any] = {}
@@ -989,14 +1091,8 @@ class GeminiQuotaWidget(ctk.CTk):
 
         last_known_gw = self.settings.get("last_known_gemini_web")
         if self.settings.get("gemini_web_enabled", False) and last_known_gw and last_known_gw.get("data"):
-            saved_ts = last_known_gw.get("timestamp", "")
-            lr_str = ""
-            if saved_ts:
-                try:
-                    lr_str = datetime.fromisoformat(saved_ts).astimezone().strftime("%H:%M")
-                except Exception:
-                    pass
-            self.update_gemini_web_card(last_known_gw["data"], is_projected=True, last_read_str=lr_str)
+            projected_gw, lr_str = calculate_projected_gw_data(last_known_gw)
+            self.update_gemini_web_card(projected_gw, is_projected=True, last_read_str=lr_str)
 
     def _apply_fetched_data(self, ag_groups: Optional[List[Dict[str, Any]]], gw_quota: Optional[Dict[str, Any]]):
         """Aplica os dados coletados nos componentes em tela SEM flicker."""
@@ -1055,14 +1151,8 @@ class GeminiQuotaWidget(ctk.CTk):
             else:
                 last_known_gw = self.settings.get("last_known_gemini_web")
                 if last_known_gw and last_known_gw.get("data"):
-                    saved_ts = last_known_gw.get("timestamp", "")
-                    lr_str = ""
-                    if saved_ts:
-                        try:
-                            lr_str = datetime.fromisoformat(saved_ts).astimezone().strftime("%H:%M")
-                        except Exception:
-                            pass
-                    self.update_gemini_web_card(last_known_gw["data"], is_projected=True, last_read_str=lr_str)
+                    projected_gw, lr_str = calculate_projected_gw_data(last_known_gw)
+                    self.update_gemini_web_card(projected_gw, is_projected=True, last_read_str=lr_str)
                 else:
                     self.update_gemini_web_card(None, is_projected=False)
         elif self.gemini_web_card is not None:
@@ -1084,6 +1174,7 @@ class GeminiQuotaWidget(ctk.CTk):
         self.card_banners.clear()
         self.bucket_widgets.clear()
         self.gemini_web_card = None
+        self.gemini_web_header = None
         self.gemini_web_badge = None
         self.gemini_web_banner = None
         self.gemini_web_widgets.clear()
@@ -1158,6 +1249,7 @@ class GeminiQuotaWidget(ctk.CTk):
                 self.card_banners[group_name] = lbl_banner
 
             card = self.rendered_cards[group_name]
+            header = self.card_headers[group_name]
             badge_est = self.card_badges[group_name]
             lbl_banner = self.card_banners[group_name]
 
@@ -1167,7 +1259,7 @@ class GeminiQuotaWidget(ctk.CTk):
                 badge_est.pack(side="left", padx=(6, 0))
                 msg = f"Dados previstos • Antigravity offline (leitura {last_read_str})" if last_read_str else "Dados previstos • Antigravity offline"
                 lbl_banner.configure(text=msg)
-                lbl_banner.pack(fill="x", padx=10, pady=(0, 4), before=card.winfo_children()[1])
+                lbl_banner.pack(fill="x", padx=10, pady=(0, 4), after=header)
             else:
                 card.configure(fg_color="#20202a", border_color="#30303c", border_width=1)
                 badge_est.pack_forget()
@@ -1182,7 +1274,8 @@ class GeminiQuotaWidget(ctk.CTk):
                 pct = round(fraction * 100, 1)
                 color = get_color_for_remaining(fraction)
                 window_name = "Limite 5 Horas" if b.get("window") == "5h" else "Limite Semanal"
-                reset_text = format_reset_info(b.get("resetTime"))
+                is_restored = bool(b.get("is_reset_restored", False))
+                reset_text = format_reset_info(b.get("resetTime"), is_restored=is_restored)
 
                 if key not in self.bucket_widgets:
                     bucket_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -1258,6 +1351,7 @@ class GeminiQuotaWidget(ctk.CTk):
             # Cabeçalho com tag PRO e badge ESTIMADO
             header = ctk.CTkFrame(card, fg_color="transparent")
             header.pack(fill="x", padx=10, pady=(8, 2))
+            self.gemini_web_header = header
 
             lbl_title = ctk.CTkLabel(
                 header,
@@ -1350,10 +1444,10 @@ class GeminiQuotaWidget(ctk.CTk):
             self.gemini_web_card.configure(fg_color="#272216", border_color="#d97706", border_width=1.5)
             if self.gemini_web_badge:
                 self.gemini_web_badge.pack(side="left", padx=(6, 0))
-            if self.gemini_web_banner:
+            if self.gemini_web_banner and self.gemini_web_header:
                 msg = f"Dados previstos • Gemini Web offline (leitura {last_read_str})" if last_read_str else "Dados previstos • Gemini Web offline"
                 self.gemini_web_banner.configure(text=msg)
-                self.gemini_web_banner.pack(fill="x", padx=10, pady=(0, 4), before=self.gemini_web_card.winfo_children()[1])
+                self.gemini_web_banner.pack(fill="x", padx=10, pady=(0, 4), after=self.gemini_web_header)
         else:
             self.gemini_web_card.configure(fg_color="#20202a", border_color="#30303c", border_width=1)
             if self.gemini_web_badge:

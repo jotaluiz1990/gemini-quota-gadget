@@ -223,11 +223,13 @@ class GeminiWebClient:
 
                     # Formata contagem regressiva e data/hora do reset
                     reset_text = ""
+                    ts_sec = None
                     if len(b) > 3 and isinstance(b[3], list) and len(b[3]) > 0:
                         ts_info = b[3][0]
                         if isinstance(ts_info, list) and len(ts_info) > 0:
-                            ts_sec = ts_info[0]
-                            if isinstance(ts_sec, (int, float)) and ts_sec > 1000000000:
+                            raw_ts = ts_info[0]
+                            if isinstance(raw_ts, (int, float)) and raw_ts > 1000000000:
+                                ts_sec = float(raw_ts)
                                 dt_local = datetime.fromtimestamp(ts_sec, timezone.utc).astimezone()
                                 now_local = datetime.now().astimezone()
                                 diff = dt_local - now_local
@@ -245,11 +247,15 @@ class GeminiWebClient:
                         result["current_remaining_pct"] = rem_pct
                         if reset_text:
                             result["current_reset_text"] = reset_text
+                        if ts_sec:
+                            result["current_reset_epoch"] = ts_sec
                     elif win_type == 2:
                         result["weekly_used_pct"] = used_pct
                         result["weekly_remaining_pct"] = rem_pct
                         if reset_text:
                             result["weekly_reset_text"] = reset_text
+                        if ts_sec:
+                            result["weekly_reset_epoch"] = ts_sec
 
         except Exception as e:
             print(f"Erro ao extrair limites do jSf9Qc: {e}")
