@@ -692,19 +692,22 @@ class SettingsWindow(ctk.CTkToplevel):
             text="Aguardando você fazer login na janela aberta...",
             text_color="#3b8ed0",
         )
+        try:
+            self.attributes("-topmost", False)
+        except Exception:
+            pass
 
         def login_worker():
             if getattr(sys, "frozen", False):
                 cmd = [sys.executable, "--login-webview"]
             else:
-                cmd = [sys.executable, os.path.join(BASE_DIR, "gemini_login_window.py")]
+                py_exe = sys.executable.replace("python.exe", "pythonw.exe")
+                if not os.path.exists(py_exe):
+                    py_exe = sys.executable
+                cmd = [py_exe, os.path.abspath(__file__), "--login-webview"]
 
             try:
-                flags = 0x08000000 if sys.platform == "win32" else 0
-                si = subprocess.STARTUPINFO() if sys.platform == "win32" else None
-                if si:
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    si.wShowWindow = 0  # SW_HIDE
+                # Janela interativa DEVE ser visível (sem SW_HIDE)
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -712,8 +715,6 @@ class SettingsWindow(ctk.CTkToplevel):
                     text=True,
                     encoding="utf-8",
                     errors="ignore",
-                    startupinfo=si,
-                    creationflags=flags,
                 )
                 output, _ = proc.communicate()
 
@@ -724,17 +725,23 @@ class SettingsWindow(ctk.CTkToplevel):
                         cookie_hdr = payload.get("cookie_header", "")
                         if cookie_hdr:
                             captured = True
-                            self.after(0, lambda: self._on_login_success(cookie_hdr))
+                            self.after(0, lambda ch=cookie_hdr: self._on_login_success(ch))
                             break
 
                 if not captured:
                     self.after(0, lambda: self._on_login_ended("Login não concluído ou janela fechada."))
             except Exception as e:
-                self.after(0, lambda: self._on_login_ended(f"Erro ao iniciar login: {e}"))
+                self.after(0, lambda err=str(e): self._on_login_ended(f"Erro ao iniciar login: {err}"))
 
         threading.Thread(target=login_worker, daemon=True).start()
 
     def _on_login_success(self, cookie_hdr: str):
+        try:
+            self.attributes("-topmost", True)
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
         self.btn_login.configure(state="normal", text="🔄 Reconectar / Trocar de Conta Google")
         self.lbl_login_status.configure(
             text="● Sessão persistente ativa (Renovação automática contínua ativada ✓)",
@@ -749,6 +756,12 @@ class SettingsWindow(ctk.CTkToplevel):
         self._test_gemini_web_connection()
 
     def _on_login_ended(self, msg: str):
+        try:
+            self.attributes("-topmost", True)
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
         session_active = has_saved_session()
         btn_text = "🔄 Reconectar / Trocar de Conta Google" if session_active else "🌐 Fazer Login no Gemini (Captura Automática)"
         self.btn_login.configure(state="normal", text=btn_text)

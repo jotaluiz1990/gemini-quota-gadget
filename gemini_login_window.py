@@ -56,10 +56,21 @@ def monitor_cookies(window: webview.Window):
     """Monitora a sessão do usuário até encontrar os cookies de autenticação do Gemini (Modo Interativo)."""
     max_wait_seconds = 300  # 5 minutos para o usuário fazer login
     start_time = time.time()
+    time.sleep(2.0)
 
     while time.time() - start_time < max_wait_seconds:
         time.sleep(1.5)
         try:
+            curr_url = ""
+            try:
+                curr_url = window.get_current_url() or ""
+            except Exception:
+                pass
+
+            # Se o usuário ainda estiver na página de login do Google (digitando credenciais/2FA), aguarda
+            if "accounts.google.com" in curr_url:
+                continue
+
             cookies = window.get_cookies()
             if not cookies:
                 continue
@@ -69,7 +80,7 @@ def monitor_cookies(window: webview.Window):
                 for k, v in cookie_item.items():
                     cookie_dict[k] = v.value
 
-            # Se encontrou o cookie principal de sessão do Google
+            # Se encontrou o cookie principal de sessão do Google e já está de volta ao Gemini
             if "__Secure-1PSID" in cookie_dict:
                 cookie_header = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
 
@@ -81,7 +92,7 @@ def monitor_cookies(window: webview.Window):
                 }
                 print("LOGIN_SUCCESS:" + json.dumps(result), flush=True)
 
-                time.sleep(1.0)
+                time.sleep(1.2)
                 window.destroy()
                 return
 
@@ -96,16 +107,17 @@ def monitor_cookies(window: webview.Window):
 
 
 def run_login_window():
-    """Abre a janela de login interativo do Gemini Web."""
+    """Abre a janela de login interativo do Gemini Web visível e em primeiro plano."""
     storage_path = get_session_storage_path()
     os.makedirs(storage_path, exist_ok=True)
 
     window = webview.create_window(
         title="Login Google Gemini - Gemini Quota Gadget",
         url="https://gemini.google.com/app",
-        width=560,
-        height=720,
+        width=580,
+        height=740,
         resizable=True,
+        on_top=True,
     )
 
     webview.start(
