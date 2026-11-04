@@ -10,7 +10,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -21,33 +21,89 @@ USER_AGENT = (
 class GeminiWebClient:
     """Cliente para obter cotas da interface web do Gemini."""
 
-    def __init__(self, cookie_string: str = ""):
+    def __init__(self, cookie_string: str = "", on_cookie_update: Optional[Callable[[str], None]] = None):
         self.cookie_string = cookie_string.strip()
+        self.cookie_dict: Dict[str, str] = self._parse_cookie_string(self.cookie_string)
+        self.on_cookie_update = on_cookie_update
         self.at_token: Optional[str] = None
         self.f_sid: Optional[str] = None
         self.cached_quota: Optional[Dict[str, Any]] = None
         self.last_fetch: float = 0
         self.last_error: Optional[str] = None
 
+    @staticmethod
+    def _parse_cookie_string(s: str) -> Dict[str, str]:
+        """Converte string de cabeçalho Cookie em dicionário chave-valor."""
+        res: Dict[str, str] = {}
+        if not s:
+            return res
+        for part in s.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                res[k.strip()] = v.strip()
+            elif part:
+                res["__Secure-1PSID"] = part
+        return res
+
+    def _get_cookie_header(self) -> str:
+        """Gera string formatada para cabeçalho HTTP Cookie a partir do dicionário atual."""
+        if not self.cookie_dict:
+            return self.cookie_string
+        return "; ".join([f"{k}={v}" for k, v in self.cookie_dict.items()])
+
     def set_cookies(self, cookie_string: str):
         """Atualiza a string de cookies e invalida tokens antigos."""
         new_val = cookie_string.strip()
         if new_val != self.cookie_string:
             self.cookie_string = new_val
+            self.cookie_dict = self._parse_cookie_string(new_val)
             self.at_token = None
             self.f_sid = None
             self.cached_quota = None
             self.last_error = None
 
+    def _process_response_headers(self, headers) -> bool:
+        """Captura cabeçalhos Set-Cookie e atualiza o jar interno de cookies dinamicamente."""
+        if not headers:
+            return False
+        set_cookies = []
+        if hasattr(headers, "get_all"):
+            set_cookies = headers.get_all("Set-Cookie") or []
+        elif hasattr(headers, "getheaders"):
+            set_cookies = headers.getheaders("Set-Cookie") or []
+
+        if not set_cookies:
+            return False
+
+        changed = False
+        for sc in set_cookies:
+            main_part = sc.split(";")[0].strip()
+            if "=" in main_part:
+                k, v = main_part.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if self.cookie_dict.get(k) != v:
+                    self.cookie_dict[k] = v
+                    changed = True
+
+        if changed:
+            self.cookie_string = self._get_cookie_header()
+            if self.on_cookie_update:
+                try:
+                    self.on_cookie_update(self.cookie_string)
+                except Exception:
+                    pass
+        return changed
+
     def _normalize_cookie_header(self) -> str:
         """Garante que a string de cookies esteja formatada para cabeçalho HTTP."""
-        c = self.cookie_string.strip()
-        if not c:
+        header = self._get_cookie_header().strip()
+        if not header:
             return ""
-        # Se o usuário colou apenas o valor do 1PSID sem a chave
-        if "=" not in c:
-            return f"__Secure-1PSID={c}"
-        return c
+        if "=" not in header:
+            return f"__Secure-1PSID={header}"
+        return header
 
     def _fetch_tokens(self) -> bool:
         """Carrega a página inicial do Gemini Web para extrair o token SNlM0e (at) e f.sid."""
@@ -67,6 +123,7 @@ class GeminiWebClient:
 
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:
+                self._process_response_headers(resp.headers)
                 html = resp.read().decode("utf-8", errors="ignore")
 
                 # Extrai token de CSRF do Google (SNlM0e)
@@ -130,6 +187,7 @@ class GeminiWebClient:
 
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:
+                self._process_response_headers(resp.headers)
                 raw_text = resp.read().decode("utf-8", errors="ignore")
                 parsed = self._parse_batchexecute_response(raw_text)
                 if parsed:
@@ -144,6 +202,7 @@ class GeminiWebClient:
                         retry_data = urllib.parse.urlencode(form_data).encode("utf-8")
                         req2 = urllib.request.Request(rpc_url, data=retry_data, headers=req.headers)
                         with urllib.request.urlopen(req2, timeout=8) as resp2:
+                            self._process_response_headers(resp2.headers)
                             raw_text2 = resp2.read().decode("utf-8", errors="ignore")
                             parsed2 = self._parse_batchexecute_response(raw_text2)
                             if parsed2:

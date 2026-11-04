@@ -34,17 +34,14 @@ Widget flutuante moderno para desktop que monitora em tempo real suas cotas de u
 - 🤫 **Operação 100% Silenciosa (Zero Popups)**:
   - Todas as chamadas de descoberta e verificação em segundo plano utilizam flags do kernel (`CREATE_NO_WINDOW` e `SW_HIDE`), impedindo qualquer janela de CMD ou PowerShell de piscar na sua tela.
 
-- 🌐 **Login com Captura Automática via WebView2**:
-  - Esqueça a necessidade de abrir o DevTools (F12) para copiar cookies manuais.
-  - Clique em **"Fazer Login no Gemini"** dentro das Configurações (`⚙`): uma janela nativa do Microsoft Edge WebView2 é aberta, você faz login na sua conta Google e o gadget **captura os cookies de sessão (`__Secure-1PSID`) e fecha automaticamente**.
+- 🌐 **Sessão Permanente do Gemini Web com Renovação Silenciosa Contínua**:
+  - Faça login uma **única vez** através da janela nativa do Edge WebView2.
+  - A sessão fica salva de forma persistente e segura no disco (`.gemini_session`).
+  - O gadget rastreia dinamicamente a rotação de cookies (`__Secure-1PSIDTS`) pelas respostas HTTP e conta com **auto-renovação silenciosa em segundo plano** (`hidden=True`, zero janelas, zero popups). Você nunca mais precisará ficar reconectando manualmente!
 
-- 🎨 **Personalização Visual e Controle Total**:
-  - **Tamanho da Fonte Customizável**: Alterne entre `Pequeno` (compacto), `Médio` (padrão ampliado para leitura confortável) e `Grande` (ideal para monitores de alta resolução).
-  - **Opacidade do Fundo com Preview em Tempo Real**: Ajuste o controle deslizante de 40% a 100% de transparência para integrar o gadget perfeitamente ao seu papel de parede.
-  - **Modo de Exibição das Porcentagens**: Escolha visualizar suas cotas como **% Restante** (quanto ainda tem) ou **% Consumida** (quanto já gastou), com adaptação automática das cores das barras.
-
-- 📌 **Bandeja do Sistema (System Tray) & Inicialização com Windows**:
-  - Não polui a barra de tarefas do Windows. Ao clicar no `✕`, o gadget se oculta diretamente na bandeja ao lado do relógio.
+- 📌 **Bandeja do Sistema (System Tray) & Sem Ícone na Barra de Tarefas**:
+  - Utiliza estilo nativo `WS_EX_TOOLWINDOW` do Windows para não poluir sua barra de tarefas nem a listagem do Alt+Tab.
+  - Fica acessível discretamente na bandeja do sistema (ao lado do relógio do Windows).
   - Menu da bandeja com opções de: *Mostrar Widget*, *Configurações*, *Atualizar Agora* e *Sair*.
   - **Iniciar com o Windows**: Chave de alternância no menu de configurações para habilitar inicialização automática no Registro do Windows (`HKCU\...\Run`).
   - Lembra com precisão a **posição (x, y)** e o **tamanho (largura, altura)** mesmo em setups com múltiplos monitores.

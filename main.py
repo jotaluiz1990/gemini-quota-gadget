@@ -25,11 +25,17 @@ from PIL import Image, ImageDraw
 import pystray
 
 from gemini_web_client import GeminiWebClient
+from gemini_login_window import has_saved_session
 
-# Modo auxiliar para captura de cookies via WebView2
+# Modo auxiliar para captura ou renovação de cookies via WebView2
 if "--login-webview" in sys.argv:
     from gemini_login_window import run_login_window
     run_login_window()
+    sys.exit(0)
+
+if "--silent-cookie-refresh" in sys.argv:
+    from gemini_login_window import run_silent_refresh
+    run_silent_refresh()
     sys.exit(0)
 
 # Diretório base para persistência (suporte a script .py e executável .exe)
@@ -494,10 +500,15 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         self.chk_web.pack(anchor="w", padx=10, pady=(10, 8))
 
+        session_active = has_saved_session()
+        btn_text = "🔄 Reconectar / Trocar de Conta Google" if session_active else "🌐 Fazer Login no Gemini (Captura Automática)"
+        status_text = "● Sessão persistente ativa (Renovação automática contínua ativada ✓)" if session_active else "Faça login uma vez; o gadget manterá a sessão conectada continuamente."
+        status_color = "#10b981" if session_active else "#888899"
+
         # Botão de Login Direto com Captura Automática
         self.btn_login = ctk.CTkButton(
             web_box,
-            text="🌐 Fazer Login no Gemini (Captura Automática)",
+            text=btn_text,
             height=32,
             fg_color="#1a73e8",
             hover_color="#1557b0",
@@ -508,9 +519,9 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self.lbl_login_status = ctk.CTkLabel(
             web_box,
-            text="Abre o navegador oficial para login; captura os cookies sozinho.",
+            text=status_text,
             font=ctk.CTkFont(size=10),
-            text_color="#888899",
+            text_color=status_color,
             justify="left",
             wraplength=310,
         )
@@ -724,19 +735,27 @@ class SettingsWindow(ctk.CTkToplevel):
         threading.Thread(target=login_worker, daemon=True).start()
 
     def _on_login_success(self, cookie_hdr: str):
-        self.btn_login.configure(state="normal", text="🌐 Fazer Login no Gemini (Captura Automática)")
-        self.lbl_login_status.configure(text="✓ Cookies capturados com sucesso!", text_color="#10b981")
+        self.btn_login.configure(state="normal", text="🔄 Reconectar / Trocar de Conta Google")
+        self.lbl_login_status.configure(
+            text="● Sessão persistente ativa (Renovação automática contínua ativada ✓)",
+            text_color="#10b981",
+        )
         self.var_web_enabled.set(True)
         self.entry_cookie.delete(0, "end")
         self.entry_cookie.insert(0, cookie_hdr)
+        self.parent.settings["gemini_web_cookie"] = cookie_hdr
+        self.parent.save_settings()
+        self.parent.web_client.set_cookies(cookie_hdr)
         self._test_gemini_web_connection()
 
     def _on_login_ended(self, msg: str):
-        self.btn_login.configure(state="normal", text="🌐 Fazer Login no Gemini (Captura Automática)")
+        session_active = has_saved_session()
+        btn_text = "🔄 Reconectar / Trocar de Conta Google" if session_active else "🌐 Fazer Login no Gemini (Captura Automática)"
+        self.btn_login.configure(state="normal", text=btn_text)
         self.lbl_login_status.configure(text=f"⚠ {msg}", text_color="#f59e0b")
 
     def _test_gemini_web_connection(self):
-        """Testa o cookie fornecido em segundo plano."""
+        """Testa o cookie fornecido em segundo plano com auto-recuperação da sessão salva."""
         cookie_text = self.entry_cookie.get().strip()
         if not cookie_text:
             self.lbl_test_result.configure(text="⚠ Nenhum cookie configurado para testar.", text_color="#ef4444")
@@ -748,6 +767,21 @@ class SettingsWindow(ctk.CTkToplevel):
         def run_test():
             client = GeminiWebClient(cookie_text)
             quota = client.fetch_quota(force_refresh=True)
+
+            # Se a consulta falhou e existe uma sessão gravada no WebView2, tenta renovação silenciosa
+            if not quota and has_saved_session():
+                self.after(0, lambda: self.lbl_test_result.configure(text="Renovando sessão salva em segundo plano...", text_color="#aaaaaa"))
+                fresh = self.parent._execute_silent_gemini_refresh()
+                if fresh:
+                    client.set_cookies(fresh)
+                    quota = client.fetch_quota(force_refresh=True)
+                    if quota:
+                        self.after(0, lambda: self.entry_cookie.delete(0, "end"))
+                        self.after(0, lambda: self.entry_cookie.insert(0, fresh))
+                        self.parent.settings["gemini_web_cookie"] = fresh
+                        self.parent.save_settings()
+                        self.parent.web_client.set_cookies(fresh)
+
             if quota:
                 msg = f"✓ Conectado! (Uso Atual: {quota.get('current_used_pct')}%)"
                 col = "#10b981"
@@ -768,10 +802,12 @@ class SettingsWindow(ctk.CTkToplevel):
         pct = int(round(val * 100))
         self.lbl_opacity_val.configure(text=f"Opacidade da Janela: {pct}%")
         self.parent.attributes("-alpha", max(0.3, min(1.0, val)))
+        self.parent.setup_hide_from_taskbar()
 
     def _on_cancel(self):
         # Restaura a opacidade original se o usuário cancelar
         self.parent.attributes("-alpha", self.initial_opacity)
+        self.parent.setup_hide_from_taskbar()
         self.destroy()
 
     def _on_autostart_toggle(self):
@@ -790,6 +826,7 @@ class SettingsWindow(ctk.CTkToplevel):
         chosen_opacity = round(self.var_opacity.get(), 2)
         self.parent.settings["opacity"] = chosen_opacity
         self.parent.attributes("-alpha", chosen_opacity)
+        self.parent.setup_hide_from_taskbar()
 
         self.parent.settings["font_size"] = self.seg_font.get()
         self.parent.settings["display_mode"] = self.seg_mode.get()
@@ -816,8 +853,12 @@ class GeminiQuotaWidget(ctk.CTk):
 
         self.load_settings()
 
-        # Cliente do Gemini Web
-        self.web_client = GeminiWebClient(self.settings.get("gemini_web_cookie", ""))
+        # Cliente do Gemini Web com callback dinâmico de Set-Cookie
+        self.web_client = GeminiWebClient(
+            self.settings.get("gemini_web_cookie", ""),
+            on_cookie_update=self._on_web_cookies_updated,
+        )
+        self._last_silent_refresh_attempt: float = 0.0
 
         # Dicionários de referências a widgets existentes para atualização sem flicker
         self.rendered_cards: Dict[str, ctk.CTkFrame] = {}
@@ -874,6 +915,11 @@ class GeminiQuotaWidget(ctk.CTk):
         # Aplica opacidade configurada (0.4 a 1.0)
         opacity = float(self.settings.get("opacity", 0.95))
         self.attributes("-alpha", max(0.3, min(1.0, opacity)))
+
+        # Garante remoção definitiva do ícone da barra de tarefas no Windows
+        self.setup_hide_from_taskbar()
+        self.after(50, self.setup_hide_from_taskbar)
+        self.after(250, self.setup_hide_from_taskbar)
 
         # Variáveis de arraste de posição
         self._drag_offset_x = 0
@@ -972,6 +1018,35 @@ class GeminiQuotaWidget(ctk.CTk):
                 )
             except Exception:
                 pass
+
+    def setup_hide_from_taskbar(self):
+        """Garante que a janela NÃO apareça na barra de tarefas do Windows (WS_EX_TOOLWINDOW)."""
+        if sys.platform != "win32":
+            return
+        try:
+            self.update_idletasks()
+            hwnd = self.winfo_id()
+            parent = ctypes.windll.user32.GetParent(hwnd)
+            target = parent if parent else hwnd
+
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_FRAMECHANGED = 0x0020
+
+            style = ctypes.windll.user32.GetWindowLongW(target, GWL_EXSTYLE)
+            new_style = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+            if new_style != style:
+                ctypes.windll.user32.SetWindowLongW(target, GWL_EXSTYLE, new_style)
+                ctypes.windll.user32.SetWindowPos(
+                    target, 0, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                )
+        except Exception:
+            pass
 
     def build_ui(self):
         """Constrói a interface visual com cantos arredondados e botões perfeitamente alinhados."""
@@ -1212,13 +1287,67 @@ class GeminiQuotaWidget(ctk.CTk):
         except Exception as e:
             print(f"Erro ao salvar settings: {e}")
 
+    def _on_web_cookies_updated(self, new_cookie: str):
+        """Atualiza e salva automaticamente os cookies renovados via Set-Cookie."""
+        if new_cookie and new_cookie != self.settings.get("gemini_web_cookie", ""):
+            self.settings["gemini_web_cookie"] = new_cookie
+            self.save_settings()
+
+    def _execute_silent_gemini_refresh(self, timeout_sec: float = 20.0) -> Optional[str]:
+        """Dispara subprocesso silencioso para renovar cookies em background via WebView2 (sem popup)."""
+        si = None
+        flags = 0
+        if sys.platform == "win32":
+            flags |= 0x08000000  # CREATE_NO_WINDOW
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0  # SW_HIDE
+
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--silent-cookie-refresh"]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), "--silent-cookie-refresh"]
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                startupinfo=si,
+                creationflags=flags,
+            )
+            output, _ = proc.communicate(timeout=timeout_sec)
+            for line in output.splitlines():
+                if line.startswith("REFRESH_SUCCESS:"):
+                    data = json.loads(line[len("REFRESH_SUCCESS:"):])
+                    cookie_hdr = data.get("cookie_header", "")
+                    if cookie_hdr:
+                        return cookie_hdr
+        except Exception as e:
+            print(f"Erro na renovação silenciosa de cookies: {e}")
+        return None
+
     def refresh_data(self):
-        """Busca cotas reais do Antigravity e do Gemini Web em background."""
+        """Busca cotas reais do Antigravity e do Gemini Web em background com auto-recuperação de sessão."""
         def fetch_worker():
             ag_groups = self.client.fetch_quota()
             gw_quota = None
             if self.settings.get("gemini_web_enabled", False):
                 gw_quota = self.web_client.fetch_quota()
+                # Se falhou e existe uma sessão salva no WebView2 ou cookie anterior
+                if gw_quota is None and (has_saved_session() or self.settings.get("gemini_web_cookie")):
+                    now = time.time()
+                    if now - self._last_silent_refresh_attempt > 60:
+                        self._last_silent_refresh_attempt = now
+                        new_cookie = self._execute_silent_gemini_refresh()
+                        if new_cookie:
+                            self.settings["gemini_web_cookie"] = new_cookie
+                            self.save_settings()
+                            self.web_client.set_cookies(new_cookie)
+                            gw_quota = self.web_client.fetch_quota()
 
             self.after(0, lambda: self._apply_fetched_data(ag_groups, gw_quota))
 
@@ -1655,11 +1784,16 @@ class GeminiQuotaWidget(ctk.CTk):
             w_reset = data.get("weekly_reset_text", "Limite semanal redefinido em breve")
             w["b2_reset"].configure(text=w_reset)
         else:
-            err = self.web_client.last_error or "Aguardando autenticação (abra ⚙)"
+            if has_saved_session():
+                err = "Renovando sessão automaticamente..."
+                tip = "Aguardando renovação de tokens..."
+            else:
+                err = self.web_client.last_error or "Aguardando login no Gemini (abra ⚙)"
+                tip = "Faça login no Gemini em ⚙"
             w["b1_val"].configure(text="Offline", text_color="#ef4444")
             w["b1_reset"].configure(text=err)
             w["b2_val"].configure(text="Offline", text_color="#ef4444")
-            w["b2_reset"].configure(text="Configure o cookie nas configurações")
+            w["b2_reset"].configure(text=tip)
 
     def render_offline_state(self):
         """Exibe mensagem amigável quando o serviço local não responde."""
@@ -1706,6 +1840,7 @@ class GeminiQuotaWidget(ctk.CTk):
 
     def show_window(self):
         self.deiconify()
+        self.setup_hide_from_taskbar()
         self.lift()
         self.attributes("-topmost", True)
         self.focus_force()

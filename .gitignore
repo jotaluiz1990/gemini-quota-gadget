@@ -16,3 +16,4 @@ quota_data.json
 build/
 dist/
 *.spec
+*.zip
