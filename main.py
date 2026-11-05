@@ -26,6 +26,8 @@ import pystray
 
 from gemini_web_client import GeminiWebClient
 from gemini_login_window import has_saved_session
+from claude_web_client import ClaudeWebClient
+from claude_login_window import has_saved_claude_session
 
 # Modo auxiliar para captura ou renovação de cookies via WebView2
 if "--login-webview" in sys.argv:
@@ -36,6 +38,16 @@ if "--login-webview" in sys.argv:
 if "--silent-cookie-refresh" in sys.argv:
     from gemini_login_window import run_silent_refresh
     run_silent_refresh()
+    sys.exit(0)
+
+if "--login-claude-webview" in sys.argv:
+    from claude_login_window import run_claude_login_window
+    run_claude_login_window()
+    sys.exit(0)
+
+if "--silent-claude-cookie-refresh" in sys.argv:
+    from claude_login_window import run_silent_claude_refresh
+    run_silent_claude_refresh()
     sys.exit(0)
 
 # Diretório base para persistência (suporte a script .py e executável .exe)
@@ -106,8 +118,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "refresh_interval_sec": 30,
     "gemini_web_enabled": False,
     "gemini_web_cookie": "",
+    "claude_web_enabled": False,
+    "claude_web_cookie": "",
     "last_known_quota": None,
     "last_known_gemini_web": None,
+    "last_known_claude_web": None,
     "font_size": "Médio",
     "opacity": 0.95,
     "display_mode": "% Restante",
@@ -242,6 +257,35 @@ def calculate_projected_gw_data(last_known: Dict[str, Any]) -> Tuple[Dict[str, A
         data["current_reset_text"] = "⏱ Cota restaurada (100%)"
 
     # Reset Semanal
+    wk_epoch = data.get("weekly_reset_epoch")
+    if wk_epoch and now_epoch >= wk_epoch:
+        data["weekly_remaining_pct"] = 100.0
+        data["weekly_used_pct"] = 0.0
+        data["weekly_reset_text"] = "⏱ Limite semanal restaurado (100%)"
+
+    return data, last_read_str
+
+
+def calculate_projected_claude_data(last_known: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """Calcula estimativa para o Claude Web se a data/hora de reset já tiver passado."""
+    data = copy.deepcopy(last_known.get("data", {}))
+    saved_ts = last_known.get("timestamp", "")
+    last_read_str = ""
+    if saved_ts:
+        dt = parse_to_utc_datetime(saved_ts)
+        if dt:
+            last_read_str = dt.astimezone().strftime("%H:%M")
+
+    now_epoch = datetime.now(timezone.utc).timestamp()
+
+    # 1. Reset da janela de 5 horas
+    fh_epoch = data.get("five_hour_reset_epoch")
+    if fh_epoch and now_epoch >= fh_epoch:
+        data["five_hour_remaining_pct"] = 100.0
+        data["five_hour_used_pct"] = 0.0
+        data["five_hour_reset_text"] = "⏱ Cota de sessão restaurada (100%)"
+
+    # 2. Reset do limite semanal (7 dias)
     wk_epoch = data.get("weekly_reset_epoch")
     if wk_epoch and now_epoch >= wk_epoch:
         data["weekly_remaining_pct"] = 100.0
@@ -418,7 +462,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.available_groups = available_groups
 
         self.title("Configurações de Cotas e Modelos")
-        self.geometry("380x620")
+        self.geometry("390x660")
         self.resizable(False, False)
         self.attributes("-topmost", True)
         self.transient(parent)
@@ -571,7 +615,102 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         self.btn_test.pack(anchor="w", padx=10, pady=(0, 10))
 
-        # Seção 3: Aparência e Visualização
+        # Seção 3: Anthropic Claude Web (PRO / Team)
+        lbl_sec_claude = ctk.CTkLabel(
+            scroll_main,
+            text="Anthropic Claude Web (PRO / Team)",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#ffffff",
+        )
+        lbl_sec_claude.pack(anchor="w", padx=8, pady=(6, 4))
+
+        claude_box = ctk.CTkFrame(scroll_main, fg_color="#1e1e28", corner_radius=8)
+        claude_box.pack(fill="x", padx=6, pady=(0, 10))
+
+        self.var_claude_enabled = ctk.BooleanVar(value=self.parent.settings.get("claude_web_enabled", False))
+        self.chk_claude = ctk.CTkCheckBox(
+            claude_box,
+            text="Ativar Monitoramento do Claude Web (PRO / Team)",
+            variable=self.var_claude_enabled,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            checkbox_width=18,
+            checkbox_height=18,
+            corner_radius=4,
+        )
+        self.chk_claude.pack(anchor="w", padx=10, pady=(10, 8))
+
+        claude_session_active = has_saved_claude_session()
+        btn_claude_text = "🔄 Reconectar / Trocar de Conta Claude" if claude_session_active else "🌐 Fazer Login no Claude (Captura Automática)"
+        status_claude_text = "● Sessão persistente ativa (Renovação automática contínua ativada ✓)" if claude_session_active else "Faça login uma vez; o gadget manterá a sessão conectada continuamente."
+        status_claude_color = "#10b981" if claude_session_active else "#888899"
+
+        # Botão de Login Direto com Captura Automática
+        self.btn_claude_login = ctk.CTkButton(
+            claude_box,
+            text=btn_claude_text,
+            height=32,
+            fg_color="#d97757",
+            hover_color="#b85d3f",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._start_claude_login_flow,
+        )
+        self.btn_claude_login.pack(fill="x", padx=10, pady=(0, 4))
+
+        self.lbl_claude_login_status = ctk.CTkLabel(
+            claude_box,
+            text=status_claude_text,
+            font=ctk.CTkFont(size=10),
+            text_color=status_claude_color,
+            justify="left",
+            wraplength=310,
+        )
+        self.lbl_claude_login_status.pack(anchor="w", padx=10, pady=(0, 8))
+
+        # Separador / Opção Manual
+        lbl_claude_or = ctk.CTkLabel(
+            claude_box,
+            text="─── ou configurar cookies manualmente ───",
+            font=ctk.CTkFont(size=10),
+            text_color="#555566",
+        )
+        lbl_claude_or.pack(fill="x", padx=10, pady=(2, 6))
+
+        lbl_claude_cookie = ctk.CTkLabel(
+            claude_box,
+            text="Cookie de Sessão (sessionKey):",
+            font=ctk.CTkFont(size=11),
+            text_color="#cccccc",
+        )
+        lbl_claude_cookie.pack(anchor="w", padx=10, pady=(2, 2))
+
+        self.entry_claude_cookie = ctk.CTkEntry(
+            claude_box,
+            placeholder_text="sk-ant-sid01-... ou sessionKey capturada no login",
+            height=28,
+            font=ctk.CTkFont(size=11),
+        )
+        saved_claude_cookie = self.parent.settings.get("claude_web_cookie", "")
+        if saved_claude_cookie:
+            self.entry_claude_cookie.insert(0, saved_claude_cookie)
+        self.entry_claude_cookie.pack(fill="x", padx=10, pady=(0, 6))
+
+        # Botão Testar Conexão Claude
+        self.lbl_claude_test_result = ctk.CTkLabel(claude_box, text="", font=ctk.CTkFont(size=10))
+        self.lbl_claude_test_result.pack(anchor="w", padx=10, pady=(0, 4))
+
+        self.btn_claude_test = ctk.CTkButton(
+            claude_box,
+            text="Testar Conexão Claude",
+            width=180,
+            height=26,
+            fg_color="#2b2b36",
+            hover_color="#3a3a48",
+            font=ctk.CTkFont(size=11),
+            command=self._test_claude_connection,
+        )
+        self.btn_claude_test.pack(anchor="w", padx=10, pady=(0, 10))
+
+        # Seção 4: Aparência e Visualização
         lbl_sec3 = ctk.CTkLabel(
             scroll_main,
             text="Aparência e Visualização",
@@ -811,6 +950,134 @@ class SettingsWindow(ctk.CTkToplevel):
         self.btn_test.configure(state="normal", text="Testar Conexão Atual")
         self.lbl_test_result.configure(text=msg, text_color=color)
 
+    def _start_claude_login_flow(self):
+        """Dispara o processo auxiliar de login via WebView nativo para captura automática de cookies do Claude."""
+        self.btn_claude_login.configure(state="disabled", text="Abrindo navegador de login...")
+        self.lbl_claude_login_status.configure(
+            text="Aguardando você fazer login na janela aberta...",
+            text_color="#d97757",
+        )
+        try:
+            self.attributes("-topmost", False)
+        except Exception:
+            pass
+
+        def login_worker():
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--login-claude-webview"]
+            else:
+                py_exe = sys.executable.replace("python.exe", "pythonw.exe")
+                if not os.path.exists(py_exe):
+                    py_exe = sys.executable
+                cmd = [py_exe, os.path.abspath(__file__), "--login-claude-webview"]
+
+            try:
+                # Janela interativa DEVE ser visível (sem SW_HIDE)
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+                output, _ = proc.communicate()
+
+                captured = False
+                for line in output.splitlines():
+                    if line.startswith("CLAUDE_LOGIN_SUCCESS:"):
+                        payload = json.loads(line[len("CLAUDE_LOGIN_SUCCESS:"):])
+                        cookie_hdr = payload.get("cookie_header", "")
+                        if cookie_hdr:
+                            captured = True
+                            self.after(0, lambda ch=cookie_hdr: self._on_claude_login_success(ch))
+                            break
+
+                if not captured:
+                    self.after(0, lambda: self._on_claude_login_ended("Login não concluído ou janela fechada."))
+            except Exception as e:
+                self.after(0, lambda err=str(e): self._on_claude_login_ended(f"Erro ao iniciar login: {err}"))
+
+        threading.Thread(target=login_worker, daemon=True).start()
+
+    def _on_claude_login_success(self, cookie_hdr: str):
+        try:
+            self.attributes("-topmost", True)
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+        self.btn_claude_login.configure(state="normal", text="🔄 Reconectar / Trocar de Conta Claude")
+        self.lbl_claude_login_status.configure(
+            text="● Sessão persistente ativa (Renovação automática contínua ativada ✓)",
+            text_color="#10b981",
+        )
+        self.var_claude_enabled.set(True)
+        self.entry_claude_cookie.delete(0, "end")
+        self.entry_claude_cookie.insert(0, cookie_hdr)
+        self.parent.settings["claude_web_cookie"] = cookie_hdr
+        self.parent.save_settings()
+        self.parent.claude_client.set_cookies(cookie_hdr)
+        self._test_claude_connection()
+
+    def _on_claude_login_ended(self, msg: str):
+        try:
+            self.attributes("-topmost", True)
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+        session_active = has_saved_claude_session()
+        btn_text = "🔄 Reconectar / Trocar de Conta Claude" if session_active else "🌐 Fazer Login no Claude (Captura Automática)"
+        self.btn_claude_login.configure(state="normal", text=btn_text)
+        self.lbl_claude_login_status.configure(text=f"⚠ {msg}", text_color="#f59e0b")
+
+    def _test_claude_connection(self):
+        """Testa o cookie fornecido em segundo plano com auto-recuperação da sessão salva."""
+        cookie_text = self.entry_claude_cookie.get().strip()
+        if not cookie_text:
+            self.lbl_claude_test_result.configure(text="⚠ Nenhum cookie configurado para testar.", text_color="#ef4444")
+            return
+
+        self.btn_claude_test.configure(state="disabled", text="Testando...")
+        self.lbl_claude_test_result.configure(text="Conectando a claude.ai...", text_color="#aaaaaa")
+
+        def run_test():
+            client = ClaudeWebClient(cookie_text)
+            quota = client.fetch_quota(force_refresh=True)
+
+            # Se a consulta falhou e existe uma sessão gravada no WebView2, tenta renovação silenciosa
+            if not quota and has_saved_claude_session():
+                self.after(0, lambda: self.lbl_claude_test_result.configure(text="Renovando sessão salva em segundo plano...", text_color="#aaaaaa"))
+                fresh = self.parent._execute_silent_claude_refresh()
+                if fresh:
+                    client.set_cookies(fresh)
+                    quota = client.fetch_quota(force_refresh=True)
+                    if quota:
+                        self.after(0, lambda: self.entry_claude_cookie.delete(0, "end"))
+                        self.after(0, lambda: self.entry_claude_cookie.insert(0, fresh))
+                        self.parent.settings["claude_web_cookie"] = fresh
+                        self.parent.save_settings()
+                        self.parent.claude_client.set_cookies(fresh)
+
+            if quota:
+                plan = quota.get("plan", "PRO")
+                used_5h = quota.get("five_hour_used_pct", 0.0)
+                msg = f"✓ Conectado! (Plano {plan} • 5h: {used_5h}% usado)"
+                col = "#10b981"
+            else:
+                err = client.last_error or "Falha de autenticação"
+                msg = f"✗ Erro: {err}"
+                col = "#ef4444"
+
+            self.after(0, lambda: self._show_claude_test_result(msg, col))
+
+        threading.Thread(target=run_test, daemon=True).start()
+
+    def _show_claude_test_result(self, msg: str, color: str):
+        self.btn_claude_test.configure(state="normal", text="Testar Conexão Claude")
+        self.lbl_claude_test_result.configure(text=msg, text_color=color)
+
     def _on_opacity_slider(self, val: float):
         pct = int(round(val * 100))
         self.lbl_opacity_val.configure(text=f"Opacidade da Janela: {pct}%")
@@ -834,6 +1101,8 @@ class SettingsWindow(ctk.CTkToplevel):
         self.parent.settings["visible_groups"] = new_visible
         self.parent.settings["gemini_web_enabled"] = self.var_web_enabled.get()
         self.parent.settings["gemini_web_cookie"] = self.entry_cookie.get().strip()
+        self.parent.settings["claude_web_enabled"] = self.var_claude_enabled.get()
+        self.parent.settings["claude_web_cookie"] = self.entry_claude_cookie.get().strip()
 
         # Novas configurações visuais
         chosen_opacity = round(self.var_opacity.get(), 2)
@@ -844,8 +1113,9 @@ class SettingsWindow(ctk.CTkToplevel):
         self.parent.settings["font_size"] = self.seg_font.get()
         self.parent.settings["display_mode"] = self.seg_mode.get()
 
-        # Atualiza o cliente Gemini Web no pai
+        # Atualiza os clientes web no pai
         self.parent.web_client.set_cookies(self.parent.settings["gemini_web_cookie"])
+        self.parent.claude_client.set_cookies(self.parent.settings["claude_web_cookie"])
 
         self.parent.save_settings()
         self.parent.full_rebuild_cards()
@@ -873,6 +1143,13 @@ class GeminiQuotaWidget(ctk.CTk):
         )
         self._last_silent_refresh_attempt: float = 0.0
 
+        # Cliente do Anthropic Claude Web com callback dinâmico de Set-Cookie
+        self.claude_client = ClaudeWebClient(
+            self.settings.get("claude_web_cookie", ""),
+            on_cookie_update=self._on_claude_cookies_updated,
+        )
+        self._last_silent_claude_refresh_attempt: float = 0.0
+
         # Dicionários de referências a widgets existentes para atualização sem flicker
         self.rendered_cards: Dict[str, ctk.CTkFrame] = {}
         self.card_headers: Dict[str, ctk.CTkFrame] = {}
@@ -884,6 +1161,11 @@ class GeminiQuotaWidget(ctk.CTk):
         self.gemini_web_badge: Optional[ctk.CTkLabel] = None
         self.gemini_web_banner: Optional[ctk.CTkLabel] = None
         self.gemini_web_widgets: Dict[str, Any] = {}
+        self.claude_web_card: Optional[ctk.CTkFrame] = None
+        self.claude_web_header: Optional[ctk.CTkFrame] = None
+        self.claude_web_badge: Optional[ctk.CTkLabel] = None
+        self.claude_web_banner: Optional[ctk.CTkLabel] = None
+        self.claude_web_widgets: Dict[str, Any] = {}
         self.offline_widget: Optional[ctk.CTkFrame] = None
 
         # Coordenadas e Dimensões da Janela (suporte pleno a desktop multi-monitor)
@@ -1306,6 +1588,12 @@ class GeminiQuotaWidget(ctk.CTk):
             self.settings["gemini_web_cookie"] = new_cookie
             self.save_settings()
 
+    def _on_claude_cookies_updated(self, new_cookie: str):
+        """Atualiza e salva automaticamente os cookies do Claude renovados via Set-Cookie."""
+        if new_cookie and new_cookie != self.settings.get("claude_web_cookie", ""):
+            self.settings["claude_web_cookie"] = new_cookie
+            self.save_settings()
+
     def _execute_silent_gemini_refresh(self, timeout_sec: float = 20.0) -> Optional[str]:
         """Dispara subprocesso silencioso para renovar cookies em background via WebView2 (sem popup)."""
         si = None
@@ -1343,8 +1631,45 @@ class GeminiQuotaWidget(ctk.CTk):
             print(f"Erro na renovação silenciosa de cookies: {e}")
         return None
 
+    def _execute_silent_claude_refresh(self, timeout_sec: float = 20.0) -> Optional[str]:
+        """Dispara subprocesso silencioso para renovar cookies do Claude em background via WebView2 (sem popup)."""
+        si = None
+        flags = 0
+        if sys.platform == "win32":
+            flags |= 0x08000000  # CREATE_NO_WINDOW
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0  # SW_HIDE
+
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--silent-claude-cookie-refresh"]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), "--silent-claude-cookie-refresh"]
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                startupinfo=si,
+                creationflags=flags,
+            )
+            output, _ = proc.communicate(timeout=timeout_sec)
+            for line in output.splitlines():
+                if line.startswith("CLAUDE_REFRESH_SUCCESS:"):
+                    data = json.loads(line[len("CLAUDE_REFRESH_SUCCESS:"):])
+                    cookie_hdr = data.get("cookie_header", "")
+                    if cookie_hdr:
+                        return cookie_hdr
+        except Exception as e:
+            print(f"Erro na renovação silenciosa de cookies do Claude: {e}")
+        return None
+
     def refresh_data(self):
-        """Busca cotas reais do Antigravity e do Gemini Web em background com auto-recuperação de sessão."""
+        """Busca cotas reais do Antigravity, Gemini Web e Claude Web em background com auto-recuperação de sessão."""
         def fetch_worker():
             ag_groups = self.client.fetch_quota()
             gw_quota = None
@@ -1362,7 +1687,21 @@ class GeminiQuotaWidget(ctk.CTk):
                             self.web_client.set_cookies(new_cookie)
                             gw_quota = self.web_client.fetch_quota()
 
-            self.after(0, lambda: self._apply_fetched_data(ag_groups, gw_quota))
+            cw_quota = None
+            if self.settings.get("claude_web_enabled", False):
+                cw_quota = self.claude_client.fetch_quota()
+                if cw_quota is None and (has_saved_claude_session() or self.settings.get("claude_web_cookie")):
+                    now = time.time()
+                    if now - self._last_silent_claude_refresh_attempt > 60:
+                        self._last_silent_claude_refresh_attempt = now
+                        new_cookie = self._execute_silent_claude_refresh()
+                        if new_cookie:
+                            self.settings["claude_web_cookie"] = new_cookie
+                            self.save_settings()
+                            self.claude_client.set_cookies(new_cookie)
+                            cw_quota = self.claude_client.fetch_quota()
+
+            self.after(0, lambda: self._apply_fetched_data(ag_groups, gw_quota, cw_quota))
 
         threading.Thread(target=fetch_worker, daemon=True).start()
 
@@ -1381,7 +1720,17 @@ class GeminiQuotaWidget(ctk.CTk):
             projected_gw, lr_str = calculate_projected_gw_data(last_known_gw)
             self.update_gemini_web_card(projected_gw, is_projected=True, last_read_str=lr_str)
 
-    def _apply_fetched_data(self, ag_groups: Optional[List[Dict[str, Any]]], gw_quota: Optional[Dict[str, Any]]):
+        last_known_cw = self.settings.get("last_known_claude_web")
+        if self.settings.get("claude_web_enabled", False) and last_known_cw and last_known_cw.get("data"):
+            projected_cw, lr_str = calculate_projected_claude_data(last_known_cw)
+            self.update_claude_web_card(projected_cw, is_projected=True, last_read_str=lr_str)
+
+    def _apply_fetched_data(
+        self,
+        ag_groups: Optional[List[Dict[str, Any]]],
+        gw_quota: Optional[Dict[str, Any]],
+        cw_quota: Optional[Dict[str, Any]] = None,
+    ):
         """Aplica os dados coletados nos componentes em tela SEM flicker."""
         now_str = datetime.now().strftime("%H:%M:%S")
 
@@ -1422,7 +1771,11 @@ class GeminiQuotaWidget(ctk.CTk):
             else:
                 self.status_dot.configure(text_color="#ef4444")
                 self.lbl_footer.configure(text="Aguardando conexão com Antigravity...")
-                if not self.latest_quota_data and not self.settings.get("gemini_web_enabled", False):
+                if (
+                    not self.latest_quota_data
+                    and not self.settings.get("gemini_web_enabled", False)
+                    and not self.settings.get("claude_web_enabled", False)
+                ):
                     self.render_offline_state()
 
         # 2. Gemini Web Quota
@@ -1449,6 +1802,30 @@ class GeminiQuotaWidget(ctk.CTk):
             self.gemini_web_banner = None
             self.gemini_web_widgets.clear()
 
+        # 3. Claude Web Quota
+        if self.settings.get("claude_web_enabled", False):
+            if cw_quota:
+                # Salva última leitura válida do Claude Web
+                self.settings["last_known_claude_web"] = {
+                    "timestamp": datetime.now().isoformat(),
+                    "data": cw_quota,
+                }
+                self.save_settings()
+                self.update_claude_web_card(cw_quota, is_projected=False)
+            else:
+                last_known_cw = self.settings.get("last_known_claude_web")
+                if last_known_cw and last_known_cw.get("data"):
+                    projected_cw, lr_str = calculate_projected_claude_data(last_known_cw)
+                    self.update_claude_web_card(projected_cw, is_projected=True, last_read_str=lr_str)
+                else:
+                    self.update_claude_web_card(None, is_projected=False)
+        elif self.claude_web_card is not None:
+            self.claude_web_card.destroy()
+            self.claude_web_card = None
+            self.claude_web_badge = None
+            self.claude_web_banner = None
+            self.claude_web_widgets.clear()
+
         self.check_scrollbar_visibility()
 
     def full_rebuild_cards(self):
@@ -1466,6 +1843,11 @@ class GeminiQuotaWidget(ctk.CTk):
         self.gemini_web_badge = None
         self.gemini_web_banner = None
         self.gemini_web_widgets.clear()
+        self.claude_web_card = None
+        self.claude_web_header = None
+        self.claude_web_badge = None
+        self.claude_web_banner = None
+        self.claude_web_widgets.clear()
         self.offline_widget = None
 
     def update_quota_display(
@@ -1803,6 +2185,193 @@ class GeminiQuotaWidget(ctk.CTk):
             else:
                 err = self.web_client.last_error or "Aguardando login no Gemini (abra ⚙)"
                 tip = "Faça login no Gemini em ⚙"
+            w["b1_val"].configure(text="Offline", text_color="#ef4444")
+            w["b1_reset"].configure(text=err)
+            w["b2_val"].configure(text="Offline", text_color="#ef4444")
+            w["b2_reset"].configure(text=tip)
+
+    def update_claude_web_card(
+        self,
+        data: Optional[Dict[str, Any]],
+        is_projected: bool = False,
+        last_read_str: str = "",
+    ):
+        """Renderiza ou atualiza o card do Anthropic Claude Web com dados reais ou previstos."""
+        display_mode = self.settings.get("display_mode", "% Restante")
+        fonts = self.get_font_sizes()
+
+        if self.claude_web_card is None:
+            card = ctk.CTkFrame(
+                self.content_scroll,
+                fg_color="#20202a",
+                border_width=1,
+                border_color="#30303c",
+                corner_radius=10,
+            )
+            card.pack(fill="x", padx=4, pady=5)
+            self.claude_web_card = card
+
+            # Cabeçalho com tag de Plano (PRO/TEAM) e badge ESTIMADO
+            header = ctk.CTkFrame(card, fg_color="transparent")
+            header.pack(fill="x", padx=10, pady=(8, 2))
+            self.claude_web_header = header
+
+            lbl_title = ctk.CTkLabel(
+                header,
+                text="Claude Web",
+                font=ctk.CTkFont(size=fonts["card_title"], weight="bold"),
+                text_color="#ffffff",
+            )
+            lbl_title.pack(side="left")
+
+            plan_str = "PRO"
+            if data and data.get("plan"):
+                plan_str = str(data.get("plan")).upper()
+
+            tag_plan = ctk.CTkLabel(
+                header,
+                text=plan_str,
+                font=ctk.CTkFont(size=fonts["badge"], weight="bold"),
+                fg_color="#d97757",
+                corner_radius=4,
+                text_color="#ffffff",
+                padx=5,
+                pady=1,
+            )
+            tag_plan.pack(side="left", padx=(6, 0))
+
+            badge_est = ctk.CTkLabel(
+                header,
+                text="⚠ ESTIMADO",
+                font=ctk.CTkFont(size=fonts["badge"], weight="bold"),
+                fg_color="#d97706",
+                text_color="#18181f",
+                corner_radius=4,
+                padx=5,
+                pady=1,
+            )
+            self.claude_web_badge = badge_est
+
+            lbl_banner = ctk.CTkLabel(
+                card,
+                text="",
+                font=ctk.CTkFont(size=fonts["banner"]),
+                text_color="#f59e0b",
+                anchor="w",
+            )
+            self.claude_web_banner = lbl_banner
+
+            # Bloco 1: Janela de 5 Horas (Sessão)
+            b1 = ctk.CTkFrame(card, fg_color="transparent")
+            b1.pack(fill="x", padx=10, pady=(2, 5))
+
+            row1 = ctk.CTkFrame(b1, fg_color="transparent")
+            row1.pack(fill="x")
+            lbl_b1_title = ctk.CTkLabel(row1, text="Sessão (5 Horas)", font=ctk.CTkFont(size=fonts["label"]), text_color="#aaaaaa")
+            lbl_b1_title.pack(side="left")
+            lbl_b1_val = ctk.CTkLabel(row1, text="--%", font=ctk.CTkFont(size=fonts["value"], weight="bold"), text_color="#10b981")
+            lbl_b1_val.pack(side="right")
+
+            pbar1 = ctk.CTkProgressBar(b1, width=210, height=fonts["bar_h"], corner_radius=3, progress_color="#10b981")
+            pbar1.set(0)
+            pbar1.pack(fill="x", pady=(2, 2))
+
+            lbl_b1_reset = ctk.CTkLabel(b1, text="Aguardando dados...", font=ctk.CTkFont(size=fonts["reset"]), text_color="#888899")
+            lbl_b1_reset.pack(anchor="w")
+
+            # Bloco 2: Limite Semanal (7 Dias)
+            b2 = ctk.CTkFrame(card, fg_color="transparent")
+            b2.pack(fill="x", padx=10, pady=(2, 6))
+
+            row2 = ctk.CTkFrame(b2, fg_color="transparent")
+            row2.pack(fill="x")
+            lbl_b2_title = ctk.CTkLabel(row2, text="Limite Semanal", font=ctk.CTkFont(size=fonts["label"]), text_color="#aaaaaa")
+            lbl_b2_title.pack(side="left")
+            lbl_b2_val = ctk.CTkLabel(row2, text="--%", font=ctk.CTkFont(size=fonts["value"], weight="bold"), text_color="#10b981")
+            lbl_b2_val.pack(side="right")
+
+            pbar2 = ctk.CTkProgressBar(b2, width=210, height=fonts["bar_h"], corner_radius=3, progress_color="#10b981")
+            pbar2.set(0)
+            pbar2.pack(fill="x", pady=(2, 2))
+
+            lbl_b2_reset = ctk.CTkLabel(b2, text="Aguardando dados...", font=ctk.CTkFont(size=fonts["reset"]), text_color="#888899")
+            lbl_b2_reset.pack(anchor="w")
+
+            self.claude_web_widgets = {
+                "tag_plan": tag_plan,
+                "b1_val": lbl_b1_val,
+                "b1_bar": pbar1,
+                "b1_reset": lbl_b1_reset,
+                "b2_val": lbl_b2_val,
+                "b2_bar": pbar2,
+                "b2_reset": lbl_b2_reset,
+            }
+
+        # Atualiza tag de plano se disponível
+        if data and data.get("plan") and "tag_plan" in self.claude_web_widgets:
+            self.claude_web_widgets["tag_plan"].configure(text=str(data.get("plan")).upper())
+
+        # Estilo do Card: Tom Amarelado se Estimado
+        if is_projected:
+            self.claude_web_card.configure(fg_color="#272216", border_color="#d97706", border_width=1.5)
+            if self.claude_web_badge:
+                self.claude_web_badge.pack(side="left", padx=(6, 0))
+            if self.claude_web_banner and self.claude_web_header:
+                msg = f"Dados previstos • Claude Web offline (leitura {last_read_str})" if last_read_str else "Dados previstos • Claude Web offline"
+                self.claude_web_banner.configure(text=msg)
+                self.claude_web_banner.pack(fill="x", padx=10, pady=(0, 4), after=self.claude_web_header)
+        else:
+            self.claude_web_card.configure(fg_color="#20202a", border_color="#30303c", border_width=1)
+            if self.claude_web_badge:
+                self.claude_web_badge.pack_forget()
+            if self.claude_web_banner:
+                self.claude_web_banner.pack_forget()
+
+        # Atualiza dados se disponíveis
+        w = self.claude_web_widgets
+        if data:
+            c_used = data.get("five_hour_used_pct", 0.0)
+            c_rem = data.get("five_hour_remaining_pct", round(max(0.0, 100.0 - c_used), 1))
+            if display_mode == "% Consumida":
+                c_frac = max(0.0, min(1.0, c_used / 100.0))
+                c_col = get_color_for_used(c_frac)
+                w["b1_val"].configure(text=f"{c_used}% consumido", text_color=c_col)
+                w["b1_bar"].set(c_frac)
+                w["b1_bar"].configure(progress_color=c_col)
+            else:
+                c_frac = max(0.0, min(1.0, c_rem / 100.0))
+                c_col = get_color_for_remaining(c_frac)
+                w["b1_val"].configure(text=f"{c_rem}% restante", text_color=c_col)
+                w["b1_bar"].set(c_frac)
+                w["b1_bar"].configure(progress_color=c_col)
+
+            c_reset = data.get("five_hour_reset_text", "⏱ Limite de sessão restaurado")
+            w["b1_reset"].configure(text=c_reset)
+
+            w_used = data.get("weekly_used_pct", 0.0)
+            w_rem = data.get("weekly_remaining_pct", round(max(0.0, 100.0 - w_used), 1))
+            if display_mode == "% Consumida":
+                w_frac = max(0.0, min(1.0, w_used / 100.0))
+                w_col = get_color_for_used(w_frac)
+                w["b2_val"].configure(text=f"{w_used}% consumido", text_color=w_col)
+                w["b2_bar"].set(w_frac)
+                w["b2_bar"].configure(progress_color=w_col)
+            else:
+                w_frac = max(0.0, min(1.0, w_rem / 100.0))
+                w_col = get_color_for_remaining(w_frac)
+                w["b2_val"].configure(text=f"{w_rem}% restante", text_color=w_col)
+                w["b2_bar"].set(w_frac)
+                w["b2_bar"].configure(progress_color=w_col)
+
+            w_reset = data.get("weekly_reset_text", "⏱ Limite semanal restaurado")
+            w["b2_reset"].configure(text=w_reset)
+        else:
+            if has_saved_claude_session():
+                err = "Renovando sessão do Claude..."
+                tip = "Aguardando renovação de sessão..."
+            else:
+                err = self.claude_client.last_error or "Aguardando login no Claude (abra ⚙)"
+                tip = "Faça login no Claude em ⚙"
             w["b1_val"].configure(text="Offline", text_color="#ef4444")
             w["b1_reset"].configure(text=err)
             w["b2_val"].configure(text="Offline", text_color="#ef4444")

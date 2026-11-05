@@ -30,6 +30,8 @@ python -m PyInstaller ^
     --hidden-import "PIL" ^
     --hidden-import "gemini_web_client" ^
     --hidden-import "gemini_login_window" ^
+    --hidden-import "claude_web_client" ^
+    --hidden-import "claude_login_window" ^
     --hidden-import "clr_loader" ^
     --hidden-import "pythonnet" ^
     main.py
