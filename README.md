@@ -86,7 +86,8 @@ Ideal tanto para seu computador pessoal quanto para o **PC do trabalho** (não p
 Abra o menu de configurações clicando no ícone de engrenagem (**⚙**) no topo do widget:
 
 1. **Modelos do Antigravity (IDE)**:
-   - Marque ou desmarque os grupos de modelos que deseja visualizar (`Gemini Models`, `Gemini 4 Argon`, `Claude and GPT models`).
+   - Ative ou desative o monitoramento geral do Antigravity com a opção mestre *Ativar Monitoramento do Antigravity (IDE)*.
+   - Escolha exatamente quais grupos de modelos deseja exibir ou ocultar (`Gemini Models`, `Gemini 4 Argon`, `Claude and GPT models`).
 2. **Google Gemini Web (PRO)**:
    - Marque a caixa *Ativar Monitoramento do Gemini Web (PRO)*.
    - Clique em **🌐 Fazer Login no Gemini (Captura Automática)** (ou *🔄 Reconectar / Trocar de Conta Google*).
@@ -96,6 +97,7 @@ Abra o menu de configurações clicando no ícone de engrenagem (**⚙**) no top
    - Clique em **🌐 Fazer Login no Claude (Captura Automática)** (ou *🔄 Reconectar / Trocar de Conta Claude*).
    - A janela de login do Claude (`claude.ai/login`) será aberta para login seguro com conta Google, email ou 2FA. O cookie de sessão (`sessionKey`) é capturado automaticamente e salvo de forma persistente.
 4. **Aparência e Visualização**:
+   - **Nome / Título do Gadget**: Personalize livremente o título exibido no topo do widget (padrão: `AI Quota Gadget`).
    - **Tamanho da Fonte**: Alterne entre `Pequeno`, `Médio` ou `Grande`.
    - **Opacidade da Janela**: Ajuste o slider para ver a janela se tornar translúcida na hora (ao vivo).
    - **Modo de Exibição das Cotas**: Selecione entre `% Restante` ou `% Consumida`.

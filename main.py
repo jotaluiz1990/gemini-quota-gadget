@@ -110,6 +110,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "width": 280,
         "height": 450,
     },
+    "app_title": "AI Quota Gadget",
+    "antigravity_enabled": True,
     "visible_groups": [
         "Gemini Models",
         "Gemini 4 Argon",
@@ -473,6 +475,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self.initial_opacity = float(self.parent.settings.get("opacity", 0.95))
         self.check_vars: Dict[str, ctk.BooleanVar] = {}
+        self.model_checkboxes: List[ctk.CTkCheckBox] = []
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
@@ -499,26 +502,56 @@ class SettingsWindow(ctk.CTkToplevel):
         grp_box = ctk.CTkFrame(scroll_main, fg_color="#1e1e28", corner_radius=8)
         grp_box.pack(fill="x", padx=6, pady=(0, 10))
 
+        self.var_antigravity_enabled = ctk.BooleanVar(
+            value=self.parent.settings.get("antigravity_enabled", True)
+        )
+        self.chk_antigravity = ctk.CTkCheckBox(
+            grp_box,
+            text="Ativar Monitoramento do Antigravity (IDE)",
+            variable=self.var_antigravity_enabled,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            checkbox_width=18,
+            checkbox_height=18,
+            corner_radius=4,
+            command=self._on_antigravity_toggle,
+        )
+        self.chk_antigravity.pack(anchor="w", padx=10, pady=(10, 6))
+
+        # Sub-container para seleção de modelos específicos
+        self.frame_sub_models = ctk.CTkFrame(grp_box, fg_color="transparent")
+        self.frame_sub_models.pack(fill="x", padx=14, pady=(0, 8))
+
+        lbl_sub = ctk.CTkLabel(
+            self.frame_sub_models,
+            text="Modelos a exibir:",
+            font=ctk.CTkFont(size=11),
+            text_color="#888899",
+        )
+        lbl_sub.pack(anchor="w", pady=(0, 4))
+
         current_visible = set(self.parent.settings.get("visible_groups", []))
         all_groups = list(dict.fromkeys(self.available_groups + list(current_visible)))
         if not all_groups:
             all_groups = DEFAULT_SETTINGS["visible_groups"]
 
+        is_ag_on = self.var_antigravity_enabled.get()
         for grp in all_groups:
             is_active = grp in current_visible
             var = ctk.BooleanVar(value=is_active)
             self.check_vars[grp] = var
 
             chk = ctk.CTkCheckBox(
-                grp_box,
+                self.frame_sub_models,
                 text=grp,
                 variable=var,
-                font=ctk.CTkFont(size=12, weight="bold" if "Gemini" in grp else "normal"),
-                checkbox_width=18,
-                checkbox_height=18,
+                font=ctk.CTkFont(size=11, weight="bold" if "Gemini" in grp else "normal"),
+                checkbox_width=16,
+                checkbox_height=16,
                 corner_radius=4,
+                state="normal" if is_ag_on else "disabled",
             )
-            chk.pack(anchor="w", padx=10, pady=6)
+            chk.pack(anchor="w", padx=4, pady=3)
+            self.model_checkboxes.append(chk)
 
         # Seção 2: Gemini Web (PRO)
         lbl_sec2 = ctk.CTkLabel(
@@ -721,6 +754,25 @@ class SettingsWindow(ctk.CTkToplevel):
 
         style_box = ctk.CTkFrame(scroll_main, fg_color="#1e1e28", corner_radius=8)
         style_box.pack(fill="x", padx=6, pady=(0, 10))
+
+        # 0. Nome / Título do Gadget
+        lbl_app_name = ctk.CTkLabel(
+            style_box,
+            text="Nome / Título do Gadget:",
+            font=ctk.CTkFont(size=11),
+            text_color="#cccccc",
+        )
+        lbl_app_name.pack(anchor="w", padx=10, pady=(8, 2))
+
+        self.entry_app_title = ctk.CTkEntry(
+            style_box,
+            placeholder_text="AI Quota Gadget",
+            height=28,
+            font=ctk.CTkFont(size=11),
+        )
+        current_title = self.parent.settings.get("app_title", "AI Quota Gadget")
+        self.entry_app_title.insert(0, current_title)
+        self.entry_app_title.pack(fill="x", padx=10, pady=(0, 8))
 
         # 1. Tamanho da Fonte
         lbl_font = ctk.CTkLabel(
@@ -1078,6 +1130,11 @@ class SettingsWindow(ctk.CTkToplevel):
         self.btn_claude_test.configure(state="normal", text="Testar Conexão Claude")
         self.lbl_claude_test_result.configure(text=msg, text_color=color)
 
+    def _on_antigravity_toggle(self):
+        state = "normal" if self.var_antigravity_enabled.get() else "disabled"
+        for chk in self.model_checkboxes:
+            chk.configure(state=state)
+
     def _on_opacity_slider(self, val: float):
         pct = int(round(val * 100))
         self.lbl_opacity_val.configure(text=f"Opacidade da Janela: {pct}%")
@@ -1094,15 +1151,22 @@ class SettingsWindow(ctk.CTkToplevel):
         set_autostart_enabled(self.var_autostart.get())
 
     def _save(self):
+        self.parent.settings["antigravity_enabled"] = self.var_antigravity_enabled.get()
         new_visible = [grp for grp, var in self.check_vars.items() if var.get()]
-        if not new_visible:
-            new_visible = [list(self.check_vars.keys())[0]]
-
         self.parent.settings["visible_groups"] = new_visible
         self.parent.settings["gemini_web_enabled"] = self.var_web_enabled.get()
         self.parent.settings["gemini_web_cookie"] = self.entry_cookie.get().strip()
         self.parent.settings["claude_web_enabled"] = self.var_claude_enabled.get()
         self.parent.settings["claude_web_cookie"] = self.entry_claude_cookie.get().strip()
+
+        # Título do Gadget
+        new_title = self.entry_app_title.get().strip() or "AI Quota Gadget"
+        self.parent.settings["app_title"] = new_title
+        self.parent.title(new_title)
+        if hasattr(self.parent, "lbl_app_title"):
+            self.parent.lbl_app_title.configure(text=new_title)
+        if self.parent.tray_icon:
+            self.parent.tray_icon.title = new_title
 
         # Novas configurações visuais
         chosen_opacity = round(self.var_opacity.get(), 2)
@@ -1198,7 +1262,7 @@ class GeminiQuotaWidget(ctk.CTk):
         self.settings["window_state"]["height"] = self.current_h
 
         # Janela frameless e topmost (sem ícone na barra de tarefas)
-        self.title("Antigravity Quota Live")
+        self.title(self.settings.get("app_title", "AI Quota Gadget"))
         self.geometry(f"{self.current_w}x{self.current_h}+{pos_x}+{pos_y}")
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -1290,7 +1354,10 @@ class GeminiQuotaWidget(ctk.CTk):
         """Aplica os tamanhos de fonte aos componentes fixos da interface."""
         fonts = self.get_font_sizes()
         if hasattr(self, "lbl_app_title"):
-            self.lbl_app_title.configure(font=ctk.CTkFont(size=fonts["title"], weight="bold"))
+            self.lbl_app_title.configure(
+                text=self.settings.get("app_title", "AI Quota Gadget"),
+                font=ctk.CTkFont(size=fonts["title"], weight="bold"),
+            )
         if hasattr(self, "lbl_footer"):
             self.lbl_footer.configure(font=ctk.CTkFont(size=fonts["footer"]))
 
@@ -1371,7 +1438,7 @@ class GeminiQuotaWidget(ctk.CTk):
         fonts = self.get_font_sizes()
         self.lbl_app_title = ctk.CTkLabel(
             self.top_bar,
-            text="Antigravity Quota",
+            text=self.settings.get("app_title", "AI Quota Gadget"),
             font=ctk.CTkFont(size=fonts["title"], weight="bold"),
             text_color="#ffffff",
         )
@@ -1671,7 +1738,10 @@ class GeminiQuotaWidget(ctk.CTk):
     def refresh_data(self):
         """Busca cotas reais do Antigravity, Gemini Web e Claude Web em background com auto-recuperação de sessão."""
         def fetch_worker():
-            ag_groups = self.client.fetch_quota()
+            ag_groups = None
+            if self.settings.get("antigravity_enabled", True) and self.settings.get("visible_groups", []):
+                ag_groups = self.client.fetch_quota()
+
             gw_quota = None
             if self.settings.get("gemini_web_enabled", False):
                 gw_quota = self.web_client.fetch_quota()
@@ -1707,13 +1777,14 @@ class GeminiQuotaWidget(ctk.CTk):
 
     def _load_cached_quota_on_startup(self):
         """Carrega e exibe instantaneamente os dados previstos/em cache salvos na última sessão."""
-        last_known = self.settings.get("last_known_quota")
-        if last_known and last_known.get("groups"):
-            projected_groups, last_read_str = calculate_projected_ag_data(last_known)
-            self.status_dot.configure(text_color="#f59e0b")
-            msg = f"Estimativa • Antigravity offline (leitura {last_read_str})" if last_read_str else "Estimativa • Antigravity offline"
-            self.lbl_footer.configure(text=msg)
-            self.update_quota_display(projected_groups, is_projected=True, last_read_str=last_read_str)
+        if self.settings.get("antigravity_enabled", True) and self.settings.get("visible_groups", []):
+            last_known = self.settings.get("last_known_quota")
+            if last_known and last_known.get("groups"):
+                projected_groups, last_read_str = calculate_projected_ag_data(last_known)
+                self.status_dot.configure(text_color="#f59e0b")
+                msg = f"Estimativa • Antigravity offline (leitura {last_read_str})" if last_read_str else "Estimativa • Antigravity offline"
+                self.lbl_footer.configure(text=msg)
+                self.update_quota_display(projected_groups, is_projected=True, last_read_str=last_read_str)
 
         last_known_gw = self.settings.get("last_known_gemini_web")
         if self.settings.get("gemini_web_enabled", False) and last_known_gw and last_known_gw.get("data"):
@@ -1735,48 +1806,61 @@ class GeminiQuotaWidget(ctk.CTk):
         now_str = datetime.now().strftime("%H:%M:%S")
 
         # 1. Antigravity Quota
-        if ag_groups:
-            self.latest_quota_data = ag_groups
-            discovered_names = [g.get("displayName") for g in ag_groups if g.get("displayName")]
-            self.known_groups = list(dict.fromkeys(self.known_groups + discovered_names))
-            self.status_dot.configure(text_color="#10b981")
-
-            if self.offline_widget is not None:
-                self.offline_widget.destroy()
-                self.offline_widget = None
-
-            # Salva a última leitura bem-sucedida para persistência e estimativa futura
-            self.settings["last_known_quota"] = {
-                "timestamp": datetime.now().isoformat(),
-                "groups": ag_groups,
-            }
-            self.save_settings()
-
-            self.update_quota_display(ag_groups, is_projected=False)
-            self.lbl_footer.configure(text=f"Atualizado às {now_str}")
-        else:
-            # Antigravity está offline: carrega última leitura e calcula dados previstos considerando resets
-            last_known = self.settings.get("last_known_quota")
-            if last_known and last_known.get("groups"):
-                projected_groups, last_read_str = calculate_projected_ag_data(last_known)
-                self.status_dot.configure(text_color="#f59e0b")
-                msg = f"Estimativa • Antigravity offline (leitura {last_read_str})" if last_read_str else "Estimativa • Antigravity offline"
-                self.lbl_footer.configure(text=msg)
+        ag_active = self.settings.get("antigravity_enabled", True) and bool(self.settings.get("visible_groups", []))
+        if ag_active:
+            if ag_groups:
+                self.latest_quota_data = ag_groups
+                discovered_names = [g.get("displayName") for g in ag_groups if g.get("displayName")]
+                self.known_groups = list(dict.fromkeys(self.known_groups + discovered_names))
+                self.status_dot.configure(text_color="#10b981")
 
                 if self.offline_widget is not None:
                     self.offline_widget.destroy()
                     self.offline_widget = None
 
-                self.update_quota_display(projected_groups, is_projected=True, last_read_str=last_read_str)
+                # Salva a última leitura bem-sucedida para persistência e estimativa futura
+                self.settings["last_known_quota"] = {
+                    "timestamp": datetime.now().isoformat(),
+                    "groups": ag_groups,
+                }
+                self.save_settings()
+
+                self.update_quota_display(ag_groups, is_projected=False)
+                self.lbl_footer.configure(text=f"Atualizado às {now_str}")
             else:
-                self.status_dot.configure(text_color="#ef4444")
-                self.lbl_footer.configure(text="Aguardando conexão com Antigravity...")
-                if (
-                    not self.latest_quota_data
-                    and not self.settings.get("gemini_web_enabled", False)
-                    and not self.settings.get("claude_web_enabled", False)
-                ):
-                    self.render_offline_state()
+                # Antigravity está offline: carrega última leitura e calcula dados previstos considerando resets
+                last_known = self.settings.get("last_known_quota")
+                if last_known and last_known.get("groups"):
+                    projected_groups, last_read_str = calculate_projected_ag_data(last_known)
+                    self.status_dot.configure(text_color="#f59e0b")
+                    msg = f"Estimativa • Antigravity offline (leitura {last_read_str})" if last_read_str else "Estimativa • Antigravity offline"
+                    self.lbl_footer.configure(text=msg)
+
+                    if self.offline_widget is not None:
+                        self.offline_widget.destroy()
+                        self.offline_widget = None
+
+                    self.update_quota_display(projected_groups, is_projected=True, last_read_str=last_read_str)
+                else:
+                    self.status_dot.configure(text_color="#ef4444")
+                    self.lbl_footer.configure(text="Aguardando conexão com Antigravity...")
+                    if (
+                        not self.settings.get("gemini_web_enabled", False)
+                        and not self.settings.get("claude_web_enabled", False)
+                    ):
+                        self.render_offline_state()
+        else:
+            # Antigravity desativado pelo usuário: limpa os cards dele se existirem
+            for card in list(self.rendered_cards.values()):
+                card.destroy()
+            self.rendered_cards.clear()
+            self.card_headers.clear()
+            self.card_badges.clear()
+            self.card_banners.clear()
+            self.bucket_widgets.clear()
+            if self.offline_widget is not None and not (not self.settings.get("gemini_web_enabled", False) and not self.settings.get("claude_web_enabled", False)):
+                self.offline_widget.destroy()
+                self.offline_widget = None
 
         # 2. Gemini Web Quota
         if self.settings.get("gemini_web_enabled", False):
@@ -1826,6 +1910,22 @@ class GeminiQuotaWidget(ctk.CTk):
             self.claude_web_banner = None
             self.claude_web_widgets.clear()
 
+        # Atualiza status e rodapé caso Antigravity não esteja ativo
+        if not ag_active:
+            gw_active = self.settings.get("gemini_web_enabled", False)
+            cw_active = self.settings.get("claude_web_enabled", False)
+            if not gw_active and not cw_active:
+                self.status_dot.configure(text_color="#888899")
+                self.lbl_footer.configure(text="Nenhum serviço ativado (abra ⚙)")
+                self.render_offline_state()
+            else:
+                if gw_quota or cw_quota:
+                    self.status_dot.configure(text_color="#10b981")
+                    self.lbl_footer.configure(text=f"Atualizado às {now_str}")
+                else:
+                    self.status_dot.configure(text_color="#f59e0b")
+                    self.lbl_footer.configure(text=f"Serviços offline • Verificado às {now_str}")
+
         self.check_scrollbar_visibility()
 
     def full_rebuild_cards(self):
@@ -1858,6 +1958,16 @@ class GeminiQuotaWidget(ctk.CTk):
     ):
         """Atualiza valores dos widgets de modelos do Antigravity em tempo real sem recriação (Zero Flicker)."""
         visible_set = set(self.settings.get("visible_groups", []))
+        if not self.settings.get("antigravity_enabled", True) or not visible_set:
+            for card in list(self.rendered_cards.values()):
+                card.destroy()
+            self.rendered_cards.clear()
+            self.card_headers.clear()
+            self.card_badges.clear()
+            self.card_banners.clear()
+            self.bucket_widgets.clear()
+            return
+
         display_mode = self.settings.get("display_mode", "% Restante")
         fonts = self.get_font_sizes()
 
@@ -2378,28 +2488,50 @@ class GeminiQuotaWidget(ctk.CTk):
             w["b2_reset"].configure(text=tip)
 
     def render_offline_state(self):
-        """Exibe mensagem amigável quando o serviço local não responde."""
+        """Exibe mensagem amigável quando nenhum serviço está respondendo ou configurado."""
         self.full_rebuild_cards()
 
         box = ctk.CTkFrame(self.content_scroll, fg_color="#202028", corner_radius=8)
         box.pack(fill="x", padx=4, pady=12)
         self.offline_widget = box
 
+        ag_on = self.settings.get("antigravity_enabled", True) and bool(self.settings.get("visible_groups", []))
+        gw_on = self.settings.get("gemini_web_enabled", False)
+        cw_on = self.settings.get("claude_web_enabled", False)
+
+        if not ag_on and not gw_on and not cw_on:
+            main_msg = "Nenhum serviço ativado"
+            sub_msg = "Abra ⚙ para ativar\nAntigravity, Gemini ou Claude."
+            btn_txt = "Abrir Configurações"
+            btn_cmd = self.open_settings
+        elif ag_on and not gw_on and not cw_on:
+            main_msg = "Antigravity Fechado\nou Inicializando..."
+            sub_msg = ""
+            btn_txt = "Tentar Reconectar"
+            btn_cmd = self.refresh_data
+        else:
+            main_msg = "Serviços Offline\nou Conectando..."
+            sub_msg = ""
+            btn_txt = "Tentar Reconectar"
+            btn_cmd = self.refresh_data
+
+        msg_full = f"{main_msg}\n{sub_msg}".strip() if sub_msg else main_msg
         lbl = ctk.CTkLabel(
             box,
-            text="Antigravity Fechado\nou Inicializando...",
+            text=msg_full,
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color="#cccccc",
+            justify="center",
         )
         lbl.pack(pady=(12, 6))
 
         btn = ctk.CTkButton(
             box,
-            text="Tentar Reconectar",
+            text=btn_txt,
             width=140,
             height=28,
             font=ctk.CTkFont(size=11),
-            command=self.refresh_data,
+            command=btn_cmd,
         )
         btn.pack(pady=(0, 12))
 
@@ -2444,7 +2576,7 @@ class GeminiQuotaWidget(ctk.CTk):
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Sair", lambda: self.after(0, self.exit_app)),
         )
-        self.tray_icon = pystray.Icon("antigravity_quota_gadget", icon_img, "Antigravity Quota Live", menu=menu)
+        self.tray_icon = pystray.Icon("ai_quota_gadget", icon_img, self.settings.get("app_title", "AI Quota Gadget"), menu=menu)
         self.tray_icon.run()
 
     def exit_app(self):
