@@ -115,6 +115,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "visible_groups": [
         "Gemini Models",
         "Gemini 4 Argon",
+        "Gemini 4 Hydrogen",
         "Claude and GPT models",
     ],
     "refresh_interval_sec": 30,
@@ -530,7 +531,7 @@ class SettingsWindow(ctk.CTkToplevel):
         lbl_sub.pack(anchor="w", pady=(0, 4))
 
         current_visible = set(self.parent.settings.get("visible_groups", []))
-        all_groups = list(dict.fromkeys(self.available_groups + list(current_visible)))
+        all_groups = list(dict.fromkeys(DEFAULT_SETTINGS["visible_groups"] + self.available_groups + list(current_visible)))
         if not all_groups:
             all_groups = DEFAULT_SETTINGS["visible_groups"]
 
@@ -1635,7 +1636,20 @@ class GeminiQuotaWidget(ctk.CTk):
                             ws = dict(DEFAULT_SETTINGS["window_state"])
                             ws.update(data["window_state"])
                             merged["window_state"] = ws
+                        migrated = False
+                        # Migração suave: inclui Gemini 4 Hydrogen se o usuário utilizava os modelos padrão
+                        if "visible_groups" in merged and isinstance(merged["visible_groups"], list):
+                            vg = merged["visible_groups"]
+                            if "Gemini 4 Hydrogen" not in vg and ("Gemini 4 Argon" in vg or "Gemini Models" in vg):
+                                if "Gemini 4 Argon" in vg:
+                                    idx = vg.index("Gemini 4 Argon") + 1
+                                    vg.insert(idx, "Gemini 4 Hydrogen")
+                                else:
+                                    vg.append("Gemini 4 Hydrogen")
+                                migrated = True
                         self.settings = merged
+                        if migrated:
+                            self.save_settings()
                         return
             except Exception as e:
                 print(f"Erro ao ler settings: {e}")
@@ -1950,6 +1964,20 @@ class GeminiQuotaWidget(ctk.CTk):
         self.claude_web_widgets.clear()
         self.offline_widget = None
 
+    @staticmethod
+    def _is_group_visible(group_name: Optional[str], visible_set: set) -> bool:
+        """Verifica se o grupo deve ser exibido, com suporte a correspondência exata ou nomes variantes."""
+        if not group_name:
+            return False
+        if group_name in visible_set:
+            return True
+        lower = group_name.lower().strip()
+        if "hydrogen" in lower:
+            return any("hydrogen" in v.lower() for v in visible_set)
+        if "argon" in lower:
+            return any("argon" in v.lower() for v in visible_set)
+        return False
+
     def update_quota_display(
         self,
         groups: List[Dict[str, Any]],
@@ -1972,13 +2000,13 @@ class GeminiQuotaWidget(ctk.CTk):
         fonts = self.get_font_sizes()
 
         active_rendered_groups = set(self.rendered_cards.keys())
-        wanted_groups = {g.get("displayName") for g in groups if g.get("displayName") in visible_set}
+        wanted_groups = {g.get("displayName") for g in groups if self._is_group_visible(g.get("displayName"), visible_set)}
         if active_rendered_groups != wanted_groups:
             self.full_rebuild_cards()
 
         for group in groups:
             group_name = group.get("displayName", "Modelo")
-            if group_name not in visible_set:
+            if not self._is_group_visible(group_name, visible_set):
                 continue
 
             buckets = group.get("buckets", [])

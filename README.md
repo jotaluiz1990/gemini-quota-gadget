@@ -22,7 +22,7 @@ Widget flutuante moderno para desktop que monitora em tempo real suas cotas de u
   - Atualização in-place dos widgets existentes: a janela **não pisca**, não recria componentes e não consome recursos desnecessários.
 
 - ⏱️ **Monitoramento Abrangente de Cotas**:
-  - **Modelos do Antigravity IDE**: Exibe cotas de limite semanal e limite de 5 horas para `Gemini Models` (Flash e Pro), `Gemini 4 Argon` e `Claude/GPT models`.
+  - **Modelos do Antigravity IDE**: Exibe cotas de limite semanal e limite de 5 horas para `Gemini Models` (Flash e Pro), `Gemini 4 Argon`, `Gemini 4 Hydrogen` e `Claude/GPT models`.
   - **Google Gemini Web (PRO)**: Monitora tanto o **Uso Atual** quanto o **Limite Semanal** da interface web oficial.
   - **Anthropic Claude Web (PRO / Team)**: Monitora tanto a **Janela de Sessão de 5 Horas** quanto o **Limite Semanal (7 Dias)** com contagem regressiva precisa de reset.
   - **Contagem Regressiva e Data/Hora de Reset**: Mostra exatamente quando cada cota será restabelecida (ex: `⏱ Reseta em 2h 29m • 05/11 às 20:21`).
@@ -87,7 +87,7 @@ Abra o menu de configurações clicando no ícone de engrenagem (**⚙**) no top
 
 1. **Modelos do Antigravity (IDE)**:
    - Ative ou desative o monitoramento geral do Antigravity com a opção mestre *Ativar Monitoramento do Antigravity (IDE)*.
-   - Escolha exatamente quais grupos de modelos deseja exibir ou ocultar (`Gemini Models`, `Gemini 4 Argon`, `Claude and GPT models`).
+   - Escolha exatamente quais grupos de modelos deseja exibir ou ocultar (`Gemini Models`, `Gemini 4 Argon`, `Gemini 4 Hydrogen`, `Claude and GPT models`).
 2. **Google Gemini Web (PRO)**:
    - Marque a caixa *Ativar Monitoramento do Gemini Web (PRO)*.
    - Clique em **🌐 Fazer Login no Gemini (Captura Automática)** (ou *🔄 Reconectar / Trocar de Conta Google*).
