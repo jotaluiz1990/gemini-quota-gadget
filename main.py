@@ -435,7 +435,7 @@ class AntigravityQuotaClient:
             return None
 
     def _query_port(self, port: int, csrf_token: str) -> Optional[List[Dict[str, Any]]]:
-        """Executa a chamada Connect-RPC para RetrieveUserQuotaSummary."""
+        """Executa a chamada Connect-RPC para RetrieveUserQuotaSummary e enriquece com modelos individuais como Gemini 4 Hydrogen."""
         url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
         req = urllib.request.Request(
             url,
@@ -450,7 +450,135 @@ class AntigravityQuotaClient:
             with urllib.request.urlopen(req, timeout=1.5) as resp:
                 if resp.status == 200:
                     payload = json.loads(resp.read().decode("utf-8"))
-                    return payload.get("response", {}).get("groups", [])
+                    groups = payload.get("response", {}).get("groups", [])
+
+                    # Garante a presença do Gemini 4 Hydrogen mesmo se a API agrupar no bucket geral de Gemini Models
+                    has_hydrogen = any("hydrogen" in g.get("displayName", "").lower() for g in groups)
+                    if not has_hydrogen:
+                        hydrogen_cfg = None
+                        try:
+                            url_status = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
+                            req_status = urllib.request.Request(
+                                url_status,
+                                data=b"{}",
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "x-codeium-csrf-token": csrf_token,
+                                    "Connect-Protocol-Version": "1",
+                                },
+                            )
+                            with urllib.request.urlopen(req_status, timeout=1.5) as r_st:
+                                if r_st.status == 200:
+                                    st_data = json.loads(r_st.read().decode("utf-8"))
+                                    configs = (
+                                        st_data.get("userStatus", {})
+                                        .get("cascadeModelConfigData", {})
+                                        .get("clientModelConfigs", [])
+                                    )
+                                    hydrogen_cfg = next(
+                                        (
+                                            c
+                                            for c in configs
+                                            if "hydrogen" in c.get("modelId", "").lower()
+                                            or "hydrogen" in c.get("label", "").lower()
+                                        ),
+                                        None,
+                                    )
+                        except Exception:
+                            hydrogen_cfg = None
+
+                        gemini_group = next(
+                            (
+                                g
+                                for g in groups
+                                if "gemini" in g.get("displayName", "").lower()
+                                and "argon" not in g.get("displayName", "").lower()
+                            ),
+                            None,
+                        )
+                        gemini_5h = (
+                            next(
+                                (
+                                    b
+                                    for b in gemini_group.get("buckets", [])
+                                    if b.get("window") == "5h"
+                                    or "5h" in b.get("bucketId", "")
+                                ),
+                                None,
+                            )
+                            if gemini_group
+                            else None
+                        )
+                        gemini_weekly = (
+                            next(
+                                (
+                                    b
+                                    for b in gemini_group.get("buckets", [])
+                                    if b.get("window") == "weekly"
+                                    or "weekly" in b.get("bucketId", "")
+                                ),
+                                None,
+                            )
+                            if gemini_group
+                            else None
+                        )
+
+                        if hydrogen_cfg or gemini_group:
+                            q_info = hydrogen_cfg.get("quotaInfo", {}) if hydrogen_cfg else {}
+                            weekly_fraction = (
+                                q_info.get("remainingFraction")
+                                if "remainingFraction" in q_info
+                                else (gemini_weekly.get("remainingFraction", 1.0) if gemini_weekly else 1.0)
+                            )
+                            weekly_reset = (
+                                q_info.get("resetTime")
+                                if "resetTime" in q_info
+                                else (gemini_weekly.get("resetTime", "") if gemini_weekly else "")
+                            )
+
+                            h_buckets = [
+                                {
+                                    "bucketId": "gemini-hydrogen-weekly",
+                                    "displayName": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remainingFraction": weekly_fraction,
+                                    "resetTime": weekly_reset,
+                                }
+                            ]
+                            if gemini_5h:
+                                h_buckets.append(
+                                    {
+                                        "bucketId": "gemini-hydrogen-5h",
+                                        "displayName": "Five Hour Limit Remaining",
+                                        "window": "5h",
+                                        "remainingFraction": gemini_5h.get("remainingFraction", 1.0),
+                                        "resetTime": gemini_5h.get("resetTime", ""),
+                                    }
+                                )
+
+                            groups.append(
+                                {
+                                    "displayName": "Gemini 4 Hydrogen",
+                                    "description": "Models within this group: Gemini 4 Hydrogen",
+                                    "buckets": h_buckets,
+                                }
+                            )
+
+                    # Ordena grupos para exibição consistente: Gemini Models, Argon, Hydrogen, Claude
+                    def _group_order(grp: Dict[str, Any]) -> int:
+                        d_name = grp.get("displayName", "").lower()
+                        if "gemini models" in d_name:
+                            return 0
+                        if "argon" in d_name:
+                            return 1
+                        if "hydrogen" in d_name:
+                            return 2
+                        if "claude" in d_name or "gpt" in d_name:
+                            return 3
+                        return 4
+
+                    groups.sort(key=_group_order)
+                    return groups
         except Exception:
             pass
         return None
